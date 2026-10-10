@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/YDot.Integration.Application/YDot.Integration.Application.csproj" />
+    <Project Path="src/YDot.Integration.Domain/YDot.Integration.Domain.csproj" />
+    <Project Path="src/YDot.Integration.Infrastructure/YDot.Integration.Infrastructure.csproj" />
+    <Project Path="src/YDot.Integration.Worker/YDot.Integration.Worker.csproj" />
+  </Folder>
+</Solution>
