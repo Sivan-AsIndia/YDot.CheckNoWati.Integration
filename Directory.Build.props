@@ -1,0 +1,22 @@
+<Project>
+  <!--
+    Settings shared by every project in the YDot.Integration solution.
+
+    One place for the target framework and the compiler switches means the four projects
+    (Domain, Application, Infrastructure, Worker) can never drift onto different language
+    rules, and a new project added later inherits them without copying anything.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <Deterministic>true</Deterministic>
+
+    <!-- Version stamped into the assembly and reported in int_worker_instances. -->
+    <Version>1.0.0</Version>
+    <Company>YDot</Company>
+    <Product>YDot.Integration</Product>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,53 @@
+# =================================================================================================
+# YDot.Integration worker, next to the running YDot stack (D:\Permaspace\Ydot-Goldwin-Latest).
+#
+#   docker compose pull && docker compose up -d     run the image from Docker Hub
+#   docker compose up -d --build                    build it from this folder instead
+#
+# IT JOINS THE YDOT STACK RATHER THAN DUPLICATING IT:
+#   - network  ydot_ydot-network          to reach PostgreSQL as ydot-postgres:5432
+#   - volume   ydot_ydot-integration-data the folder the CAM API writes uploads into; mounted
+#                                         here as /app/data, so /app/data/inbox is the inbox
+# Both are created by the YDot stack's docker-compose.yml, so start that stack first.
+#
+# Secrets come from .env (see .env.example). The connection string is overridden below with the
+# in-network address, which is exactly the connection string the web application uses:
+#   Port=5432;Database=ydotphaseupdated;Username=postgres;Password=user (Host=ydot-postgres).
+# =================================================================================================
+name: ydot-integration
+
+services:
+  ydot-integration-worker:
+    image: sivan67906/ydot-integration-worker:10.1.0
+    build:
+      context: .
+      dockerfile: src/YDot.Integration.Worker/Dockerfile
+    container_name: ydot-integration-worker
+    env_file:
+      - .env
+    environment:
+      DOTNET_ENVIRONMENT: Production
+      ConnectionStrings__IntegrationDatabase: "Host=ydot-postgres;Port=5432;Database=ydotphaseupdated;Username=postgres;Password=user"
+      Worker__DataRoot: /app/data
+      Worker__InstanceName: docker
+      Seq__ServerUrl: "http://seq:5341"
+    volumes:
+      - ydot-integration-data:/app/data
+      - ydot-integration-logs:/app/logs
+    # On stop the worker takes up to 60 s (ShutdownTimeout) to release a running job; Docker's
+    # default is to kill it after 10.
+    stop_grace_period: 75s
+    restart: unless-stopped
+    networks:
+      - ydot-network
+
+networks:
+  ydot-network:
+    external: true
+    name: ydot_ydot-network
+
+volumes:
+  ydot-integration-data:
+    external: true
+    name: ydot_ydot-integration-data
+  ydot-integration-logs:

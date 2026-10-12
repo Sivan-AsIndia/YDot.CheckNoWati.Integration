@@ -1,9 +1,28 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
+  <!--
+    The Application layer: the workflow itself. File registration, number normalisation,
+    the job pipeline (parse -> CheckNumber.ai -> verify -> WATI -> output), the WATI recipient
+    rules, retry policy and the command processor all live here.
+
+    It talks to the outside world only through the interfaces in Abstractions/, which the
+    Infrastructure layer implements. EF Core is referenced for DbSet/IQueryable only (the
+    IIntegrationDbContext abstraction); the PostgreSQL provider is an Infrastructure concern.
+  -->
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
+    <RootNamespace>YDot.Integration.Application</RootNamespace>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.12" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.12" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.12" />
+    <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="10.0.12" />
+    <PackageReference Include="libphonenumber-csharp" Version="9.0.41" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\YDot.Integration.Domain\YDot.Integration.Domain.csproj" />
+  </ItemGroup>
 
 </Project>

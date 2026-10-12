@@ -1,9 +1,13 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
+  <!--
+    The Domain layer: entities, enums and the rules that belong to them (job status
+    transitions, skip reasons, error codes). It references NOTHING - no EF Core, no HTTP,
+    no logging - so the business vocabulary can be read and reasoned about on its own.
+    Target framework and compiler switches come from Directory.Build.props.
+  -->
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
+    <RootNamespace>YDot.Integration.Domain</RootNamespace>
   </PropertyGroup>
 
 </Project>

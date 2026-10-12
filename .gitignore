@@ -361,3 +361,9 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+# ---- YDot.Integration ------------------------------------------------------------------------
+# Secrets: the real .env is never committed (.env.example is the template).
+.env
+# Runtime data: phone numbers, uploads, CheckNumber.ai results, output files.
+/data/
+src/YDot.Integration.Worker/data/

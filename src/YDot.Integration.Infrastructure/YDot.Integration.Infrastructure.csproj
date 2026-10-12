@@ -1,9 +1,34 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
+  <!--
+    The Infrastructure layer: everything that touches the outside world.
+
+      Persistence/       PostgreSQL through EF Core (int_* tables, migrations, job leases)
+      ExternalApis/      CheckNumber.ai and WATI HTTP clients
+      Files/             inbox folder, file readiness, .txt/.csv/.xls/.xlsx readers, zip extraction
+      Configuration/     the .env loader
+
+    Package versions follow the main YDot platform (EF Core 10 / Npgsql 10 / snake_case
+    naming), because the tables live in the same ydotphaseupdated database.
+  -->
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
+    <RootNamespace>YDot.Integration.Infrastructure</RootNamespace>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
+    <PackageReference Include="EFCore.NamingConventions" Version="10.0.1" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.12" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.12">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.12" />
+    <PackageReference Include="ExcelDataReader" Version="3.9.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\YDot.Integration.Application\YDot.Integration.Application.csproj" />
+  </ItemGroup>
 
 </Project>
