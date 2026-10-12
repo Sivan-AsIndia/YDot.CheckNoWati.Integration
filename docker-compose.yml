@@ -18,7 +18,7 @@ name: ydot-integration
 
 services:
   ydot-integration-worker:
-    image: sivan67906/ydot-integration-worker:10.1.0
+    image: sivan67906/ydot-integration-worker:10.1.5
     build:
       context: .
       dockerfile: src/YDot.Integration.Worker/Dockerfile
