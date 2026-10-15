@@ -28,6 +28,10 @@ public static class EventCodes
     public const string WatiBatchFailed = "WATI_BATCH_FAILED";
     public const string WatiBatchUncertain = "WATI_BATCH_UNCERTAIN";
     public const string WatiJobCompleted = "WATI_JOB_COMPLETED";
+    public const string WatiJobRetried = "WATI_JOB_RETRIED";
+
+    /// <summary>A check finished: its verified numbers are ready to be picked for a send. Nothing was messaged.</summary>
+    public const string NumbersReadyForSelection = "NUMBERS_READY_FOR_SELECTION";
     public const string RetryScheduled = "RETRY_SCHEDULED";
     public const string OutputWritten = "OUTPUT_WRITTEN";
     public const string JobCompleted = "JOB_COMPLETED";

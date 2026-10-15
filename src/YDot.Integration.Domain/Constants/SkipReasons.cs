@@ -27,6 +27,9 @@ public static class SkipReasons
     /// <summary>The number is not a WhatsApp-verified number of this organisation (manual broadcast).</summary>
     public const string NotInPool = "NOT_IN_POOL";
 
+    /// <summary>The selected value is not a phone number at all (only ever in int_wati_jobs.excluded_json).</summary>
+    public const string InvalidNumber = "INVALID_NUMBER";
+
     /// <summary>The WATI job was cancelled before this message was sent.</summary>
     public const string Cancelled = "CANCELLED";
 }

@@ -13,5 +13,12 @@ public enum WorkerCommandType
     SendWatiBroadcast,
 
     /// <summary>Refresh int_wati_templates from WATI now.</summary>
-    SyncWatiTemplates
+    SyncWatiTemplates,
+
+    /// <summary>
+    /// Put the messages of one finished send that failed for a reason a retry can fix (an expired
+    /// token, an outage, an unconfirmed batch) back in the queue. Nothing that was accepted is sent
+    /// again, and nobody who was not in the original send is added.
+    /// </summary>
+    RetryWatiJob
 }

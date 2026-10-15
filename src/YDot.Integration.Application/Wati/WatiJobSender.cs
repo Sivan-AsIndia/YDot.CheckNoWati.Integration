@@ -151,6 +151,13 @@ public sealed class WatiJobSender(
                 return;
             }
 
+            await ReloadJobAsync(watiJob, cancellationToken);
+            if (watiJob.IsTerminal)
+            {
+                // Finished from elsewhere meanwhile (a cancellation skipped what was left); that outcome stands.
+                return;
+            }
+
             if (Settings.DelayBetweenBatchesMilliseconds > 0)
             {
                 await Task.Delay(TimeSpan.FromMilliseconds(Settings.DelayBetweenBatchesMilliseconds), time, cancellationToken);
@@ -538,6 +545,15 @@ public sealed class WatiJobSender(
     }
 
     // =============================================================================== finishing
+
+    /// <summary>
+    /// Renewing the lease is an UPDATE of the job's row from another connection, and every UPDATE
+    /// gives a PostgreSQL row a new xmin - the job's concurrency token. Without reading the row
+    /// again, the next save of the job (the finish) matched no row and failed the round. Reading it
+    /// again takes the new xmin over, and brings in a change made meanwhile (a cancellation).
+    /// </summary>
+    private Task ReloadJobAsync(WatiJob watiJob, CancellationToken cancellationToken) =>
+        db.ChangeTracker.Entries<WatiJob>().First(entry => ReferenceEquals(entry.Entity, watiJob)).ReloadAsync(cancellationToken);
 
     private async Task FailRemainingAsync(WatiJob watiJob, string code, string reason, CancellationToken cancellationToken)
     {

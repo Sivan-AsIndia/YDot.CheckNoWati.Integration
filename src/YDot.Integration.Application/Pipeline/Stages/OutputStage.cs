@@ -131,7 +131,8 @@ public sealed class OutputStage(
 
         if (watiJob is null)
         {
-            parts.Add(job.RunWati ? "no WATI messages" : "WATI not run for this job");
+            // The normal case since 15 October 2026: a check validates, a person then picks who to message.
+            parts.Add(job.WhatsAppYes > 0 ? "ready to select on WhatsApp Messages - nothing was messaged" : "nothing to message");
         }
         else if (watiJob.Status == WatiJobStatus.Failed && watiJob.AcceptedCount == 0 && watiJob.FailedCount > 0)
         {
@@ -167,9 +168,11 @@ public sealed class OutputStage(
                 .ToDictionaryAsync(m => m.PhoneNumberId, cancellationToken);
 
         await using var writer = new StreamWriter(path, append: false, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+        // contact_name is LAST so the columns before it keep the positions older readers expect. The
+        // wati_* columns stay filled only for an older job whose check messaged its numbers itself.
         await writer.WriteLineAsync(
             "sheet,line_number,original_value,normalized_number,country,classification,whatsapp_available,answer_source,"
-            + "checknumber_task_id,note,wati_status,wati_skip_reason,wati_local_message_id,wati_error");
+            + "checknumber_task_id,note,wati_status,wati_skip_reason,wati_local_message_id,wati_error,contact_name");
 
         var skip = 0;
         const int pageSize = 5000;
@@ -227,6 +230,7 @@ public sealed class OutputStage(
                     message?.SkipReason ?? string.Empty,
                     message is { Status: not WatiMessageStatus.Skipped } ? message.LocalMessageId : string.Empty,
                     message?.ErrorMessage ?? message?.FailedReason ?? string.Empty,
+                    n.ContactName ?? string.Empty,
                 };
 
                 await writer.WriteLineAsync(string.Join(',', fields.Select(Csv)));

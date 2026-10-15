@@ -6,8 +6,9 @@ using YDot.Integration.Application.Wati;
 namespace YDot.Integration.Worker.Services;
 
 /// <summary>
-/// Sends queued WATI jobs - the automatic ones the pipeline creates after a check, and the manual
-/// broadcasts requested from the Wati page - one job at a time per instance, batch by batch.
+/// Sends queued WATI jobs - the sends a person requests for a selection of numbers on the WhatsApp
+/// Messages page (a check never queues one any more; an older automatic job still in the queue is
+/// finished the same way) - one job at a time per instance, batch by batch.
 /// </summary>
 public sealed class WatiDispatchWorker(
     IServiceScopeFactory scopes,

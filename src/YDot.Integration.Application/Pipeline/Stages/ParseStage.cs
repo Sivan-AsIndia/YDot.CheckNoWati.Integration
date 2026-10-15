@@ -279,6 +279,7 @@ public sealed class ParseStage(
             var country = CountryDirectory.Of(e164);
 
             row.NormalizedNumber = e164;
+            row.ContactName = occurrence.ContactName;
             row.PhoneNumberId = entry.Id;
             row.CountryIso = country.Iso;
             row.CountryName = country.Name;

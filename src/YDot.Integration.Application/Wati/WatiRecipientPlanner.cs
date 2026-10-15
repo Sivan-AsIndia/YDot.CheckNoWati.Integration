@@ -9,12 +9,20 @@ using YDot.Integration.Domain.Enums;
 namespace YDot.Integration.Application.Wati;
 
 /// <summary>A number that might receive a message.</summary>
+/// <param name="SourceJobId">The check job whose verified answer made the number eligible.</param>
+/// <param name="SourceJobNumber">That job's number, for the audit columns.</param>
+/// <param name="ContactName">The name the source file gave beside the number.</param>
+/// <param name="Parameters">This recipient's template values, when they differ from the job's (bound parameters).</param>
 public sealed record WatiCandidate(
     Guid PhoneNumberId,
     string Digits,
     WhatsAppStatus WhatsAppStatus,
     Guid? CheckNumberTaskId,
-    string? CheckNumberProviderTaskId);
+    string? CheckNumberProviderTaskId,
+    Guid? SourceJobId = null,
+    string? SourceJobNumber = null,
+    string? ContactName = null,
+    IReadOnlyList<TemplateParameter>? Parameters = null);
 
 /// <summary>The decision for one candidate.</summary>
 public sealed record PlannedMessage(WatiCandidate Candidate, WatiMessageStatus Status, string? SkipReason);
@@ -29,8 +37,10 @@ public sealed record PlannedMessage(WatiCandidate Candidate, WatiMessageStatus S
 ///   4. same template already sent to this number for the same campaign -> ALREADY_SENT
 ///   5. Wati:MaxRecipientsPerJob reached        -> MAX_RECIPIENTS_REACHED
 ///
-/// A number listed twice is planned once. Manual broadcasts and automatic sends go through the
-/// same rules, so a person on the Wati page cannot bypass the safety settings.
+/// A number listed twice is planned once. Every send - a person's selection, or an older automatic
+/// send still in flight - goes through the same rules, so nobody on the Wati page can bypass the
+/// safety settings. The candidates are only ever the numbers the person selected: the planner can
+/// leave one out, never add one.
 /// </summary>
 public sealed class WatiRecipientPlanner(IIntegrationDbContext db, IOptions<WatiOptions> options, TimeProvider time)
 {

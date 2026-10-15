@@ -37,17 +37,26 @@ public sealed class WatiOptions
     public List<TemplateParameterOption> DefaultParameters { get; set; } = [];
 
     /// <summary>
-    /// SAFETY CAP: at most this many messages per WATI job; the rest are recorded as
-    /// MAX_RECIPIENTS_REACHED. 0 = unlimited. Kept low by default so a test can never message
-    /// hundreds of real people by accident - raise it deliberately for production.
+    /// THE MOST NUMBERS ONE SEND MAY MESSAGE. The WhatsApp Messages page stops a selection at this
+    /// size and the web application refuses a larger one; anything over it that still reached the
+    /// worker is recorded as MAX_RECIPIENTS_REACHED. 0 = no limit. 50 by default - the 10 to 50
+    /// people a send is meant for. A test environment sets it lower (the .env template has 5).
     /// </summary>
-    public int MaxRecipientsPerJob { get; set; } = 5;
+    public int MaxRecipientsPerJob { get; set; } = 50;
 
     /// <summary>
     /// TEST MODE: when not empty, only these numbers (digits, with country code) are ever messaged;
-    /// every other verified number is recorded as NOT_IN_ALLOWLIST.
+    /// every other selected number is recorded as NOT_IN_ALLOWLIST. A guard for testing against a
+    /// real WATI account, not the way sends are limited: that is the person's selection.
     /// </summary>
     public List<string> AllowedNumbers { get; set; } = [];
+
+    /// <summary>
+    /// The allow-list entries that are numbers (a blank entry, e.g. from an emptied .env line, is
+    /// not one). A method rather than a property, so the configuration binder leaves it alone.
+    /// </summary>
+    public IReadOnlyList<string> EffectiveAllowedNumbers() =>
+        AllowedNumbers.Where(number => !string.IsNullOrWhiteSpace(number)).ToList();
 
     /// <summary>Do not send the same template to the same number for the same campaign twice.</summary>
     public bool SkipAlreadyMessagedNumbers { get; set; } = true;

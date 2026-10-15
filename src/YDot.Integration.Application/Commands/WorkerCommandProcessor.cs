@@ -29,7 +29,13 @@ public sealed class WorkerCommandProcessor(
 {
     private const int MaxAttempts = 5;
 
-    private static readonly string[] RetryableWatiFailures =
+    /// <summary>
+    /// The failures a retry can fix: an expired token (once it is replaced), an outage, a batch
+    /// whose outcome was never confirmed, missing WATI settings, a refusal of the whole request.
+    /// A number WATI refused (WATI_INVALID_NUMBER) or a message WhatsApp itself failed is not one -
+    /// sending it again would fail again, or reach somebody twice.
+    /// </summary>
+    public static readonly IReadOnlyList<string> RetryableWatiFailures =
     [
         ErrorCodes.WatiUnauthorized,
         ErrorCodes.WatiUnavailable,
@@ -54,6 +60,7 @@ public sealed class WorkerCommandProcessor(
                 WorkerCommandType.CancelJob => await CancelJobAsync(command, Read<CancelJobPayload>(command), cancellationToken),
                 WorkerCommandType.SendWatiBroadcast => await SendBroadcastAsync(command, Read<SendWatiBroadcastPayload>(command), cancellationToken),
                 WorkerCommandType.SyncWatiTemplates => await SyncTemplatesAsync(cancellationToken),
+                WorkerCommandType.RetryWatiJob => await RetryWatiJobAsync(command, Read<RetryWatiJobPayload>(command), cancellationToken),
                 _ => (WorkerCommandStatus.Rejected, $"Unknown command type {command.CommandType}.", (Guid?)null),
             };
 
@@ -85,7 +92,7 @@ public sealed class WorkerCommandProcessor(
         await db.SaveChangesAsync(CancellationToken.None);
     }
 
-    // =============================================================================== retry
+    // =============================================================================== retry a check
 
     private async Task<(WorkerCommandStatus, string, Guid?)> RetryJobAsync(
         WorkerCommand command, RetryJobPayload payload, CancellationToken cancellationToken)
@@ -98,7 +105,7 @@ public sealed class WorkerCommandProcessor(
 
         if (!JobStatusRules.CanRetry(job.Status))
         {
-            return (WorkerCommandStatus.Rejected, $"Job {job.JobNumber} is {job.Status}; only a job that failed, was cancelled or completed with errors can be retried.", job.Id);
+            return (WorkerCommandStatus.Rejected, $"Job {job.JobNumber} is {job.Status}; only a check that failed or was stopped can be retried.", job.Id);
         }
 
         var resumeAt = await PrepareResumeAsync(job, cancellationToken);
@@ -130,10 +137,14 @@ public sealed class WorkerCommandProcessor(
     }
 
     /// <summary>
-    /// Works out where a failed / cancelled job should pick up, and resets only what blocks it:
+    /// Works out where a failed / cancelled check should pick up, and resets only what blocks it:
     /// an uncertain or failed CheckNumber.ai task is replaced by a new one (the old row is kept,
-    /// superseded), a timed-out task is polled again (same task_id, no new charge), and WATI
-    /// messages that failed for a reason a retry can fix go back to the queue.
+    /// superseded), a timed-out task is polled again (same task_id, no new charge).
+    ///
+    /// A CHECK'S RETRY NEVER SENDS ANYTHING. Once its numbers are verified it goes on to its output;
+    /// messages are sent - and retried - only from a person's selection on the WhatsApp Messages
+    /// page. The one exception is an older job whose automatic WATI send is still in flight: it
+    /// goes back to wait for that send to finish, so the figures on the job are complete.
     /// </summary>
     private async Task<IntegrationJobStatus> PrepareResumeAsync(IntegrationJob job, CancellationToken cancellationToken)
     {
@@ -207,68 +218,13 @@ public sealed class WorkerCommandProcessor(
             return IntegrationJobStatus.Verifying;
         }
 
-        if (!job.RunWati)
-        {
-            return IntegrationJobStatus.GeneratingOutput;
-        }
+        var legacySendInFlight = await db.WatiJobs.AnyAsync(w => w.IntegrationJobId == job.Id
+                                                                 && (w.Status == WatiJobStatus.Queued || w.Status == WatiJobStatus.Sending), cancellationToken);
 
-        var watiJob = await db.WatiJobs.Where(w => w.IntegrationJobId == job.Id).OrderByDescending(w => w.CreatedAtUtc).FirstOrDefaultAsync(cancellationToken);
-        if (watiJob is null)
-        {
-            return IntegrationJobStatus.SendingWati;
-        }
-
-        if (watiJob.ErrorCode == ErrorCodes.WatiTemplateMissing)
-        {
-            // Nothing was ever sent: discard it so the WATI stage builds it again with today's settings.
-            await db.WatiMessages.Where(m => m.WatiJobId == watiJob.Id).ExecuteDeleteAsync(cancellationToken);
-            db.WatiJobs.Remove(watiJob);
-            await db.SaveChangesAsync(cancellationToken);
-            return IntegrationJobStatus.SendingWati;
-        }
-
-        await RequeueRetryableMessagesAsync(watiJob, cancellationToken);
-
-        // ALWAYS THROUGH THE WATI STAGE, even when nothing was requeued. That stage copies the WATI
-        // job's figures (sent, failed, skipped) onto the job, and a finished WATI job simply passes
-        // straight through to the output - so a retry never writes an output with stale counts.
-        return IntegrationJobStatus.SendingWati;
+        return legacySendInFlight ? IntegrationJobStatus.SendingWati : IntegrationJobStatus.GeneratingOutput;
     }
 
-    private async Task<int> RequeueRetryableMessagesAsync(WatiJob watiJob, CancellationToken cancellationToken)
-    {
-        var now = time.GetUtcNow();
-        var requeued = await db.WatiMessages
-            .Where(m => m.WatiJobId == watiJob.Id && m.Status == WatiMessageStatus.Failed
-                        && m.FailedCode != null && RetryableWatiFailures.Contains(m.FailedCode))
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(m => m.Status, WatiMessageStatus.Queued)
-                .SetProperty(m => m.WatiBatchId, (Guid?)null)
-                .SetProperty(m => m.RequestStatus, WatiRequestStatus.NotSent)
-                .SetProperty(m => m.FailedCode, (string?)null)
-                .SetProperty(m => m.FailedReason, (string?)null)
-                .SetProperty(m => m.FailedAtUtc, (DateTimeOffset?)null)
-                .SetProperty(m => m.ErrorMessage, (string?)null)
-                .SetProperty(m => m.CompletedAtUtc, (DateTimeOffset?)null)
-                .SetProperty(m => m.RetryCount, m => m.RetryCount + 1)
-                .SetProperty(m => m.UpdatedAtUtc, now), cancellationToken);
-
-        if (requeued > 0)
-        {
-            await WatiJobCounters.RefreshAsync(db, watiJob, cancellationToken);
-            watiJob.Status = WatiJobStatus.Queued;
-            watiJob.ErrorCode = null;
-            watiJob.ErrorMessage = null;
-            watiJob.CompletedAtUtc = null;
-            watiJob.NextAttemptAtUtc = now;
-            watiJob.UpdatedAtUtc = now;
-            await db.SaveChangesAsync(cancellationToken);
-        }
-
-        return requeued;
-    }
-
-    // =============================================================================== cancel
+    // =============================================================================== cancel a check
 
     private async Task<(WorkerCommandStatus, string, Guid?)> CancelJobAsync(
         WorkerCommand command, CancelJobPayload payload, CancellationToken cancellationToken)
@@ -294,7 +250,7 @@ public sealed class WorkerCommandProcessor(
         return (WorkerCommandStatus.Completed, $"Job {job.JobNumber} will stop at the next safe point.", job.Id);
     }
 
-    // =============================================================================== broadcast
+    // =============================================================================== send a selection
 
     private async Task<(WorkerCommandStatus, string, Guid?)> SendBroadcastAsync(
         WorkerCommand command, SendWatiBroadcastPayload payload, CancellationToken cancellationToken)
@@ -315,24 +271,144 @@ public sealed class WorkerCommandProcessor(
             return (WorkerCommandStatus.Rejected, "Give the broadcast a name.", null);
         }
 
-        if (payload.Recipients is not { Count: > 0 })
+        if (payload.Selection is not { Count: > 0 } && payload.Recipients is not { Count: > 0 })
         {
             return (WorkerCommandStatus.Rejected, "Choose at least one recipient.", null);
         }
 
         var watiJob = await watiJobs.CreateManualAsync(command, payload, cancellationToken);
 
-        // A requested number that is not one of this organisation's WhatsApp-verified numbers (or is
-        // not a phone number at all, or was listed twice) never becomes a message. Say how many, so
+        // A selected number that is not one of this organisation's checked numbers (or is not a
+        // phone number at all, or was selected twice) never becomes a message. Say how many, so
         // "I chose 5 and 4 are in the report" is answered where the person is looking.
-        var leftOut = payload.Recipients.Count - watiJob.TotalRecipients;
+        var leftOut = watiJob.RequestedCount - watiJob.TotalRecipients;
         var leftOutNote = leftOut > 0
-            ? $" {leftOut} requested number(s) were left out: not WhatsApp-verified numbers of this organisation ({SkipReasons.NotInPool}), not valid, or listed twice."
+            ? $" Left out of the selection: {LeftOutByReason(watiJob.ExcludedJson, leftOut)}."
             : string.Empty;
 
         return (WorkerCommandStatus.Completed,
             $"WATI job {watiJob.Reference} created: {watiJob.QueuedCount} to send, {watiJob.SkippedCount} skipped.{leftOutNote}",
             watiJob.Id);
+    }
+
+    /// <summary>"1 INVALID_NUMBER, 1 NOT_IN_POOL", from a send's excluded_json (the count alone if it cannot be read).</summary>
+    private static string LeftOutByReason(string? excludedJson, int leftOut)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(string.IsNullOrWhiteSpace(excludedJson) ? "[]" : excludedJson);
+            var counts = document.RootElement.EnumerateArray()
+                .Select(entry => entry.ValueKind == JsonValueKind.Object && entry.TryGetProperty("reason", out var reason) ? reason.GetString() : null)
+                .Where(reason => !string.IsNullOrWhiteSpace(reason))
+                .GroupBy(reason => reason!, StringComparer.Ordinal)
+                .Select(group => $"{group.Count()} {group.Key}")
+                .ToList();
+            if (counts.Count > 0)
+            {
+                return string.Join(", ", counts);
+            }
+        }
+        catch (JsonException)
+        {
+            // Fall through to the plain count.
+        }
+
+        return $"{leftOut} number(s)";
+    }
+
+    // =============================================================================== retry a send
+
+    /// <summary>
+    /// Puts the failed messages of one finished send back in the queue - only those that failed
+    /// for a reason a retry can fix (<see cref="RetryableWatiFailures"/>). Nothing WATI accepted is
+    /// sent again and nobody outside the original selection is added: the rows already exist, they
+    /// only go from Failed back to Queued.
+    ///
+    /// ONLY A PERSON'S SEND. An older automatic send messaged a whole file without anybody choosing
+    /// the recipients; its failures stay recorded as they are.
+    /// </summary>
+    private async Task<(WorkerCommandStatus, string, Guid?)> RetryWatiJobAsync(
+        WorkerCommand command, RetryWatiJobPayload payload, CancellationToken cancellationToken)
+    {
+        var pipeline = pipelineOptions.Value;
+        if (!pipeline.EnableWati || !pipeline.AllowManualWatiBroadcasts)
+        {
+            return (WorkerCommandStatus.Rejected, "WATI sending is switched off in the worker configuration (Pipeline:EnableWati / AllowManualWatiBroadcasts).", null);
+        }
+
+        var watiJob = await db.WatiJobs.SingleOrDefaultAsync(w => w.Id == payload.WatiJobId && w.TenantId == command.TenantId, cancellationToken);
+        if (watiJob is null)
+        {
+            return (WorkerCommandStatus.Rejected, "That send was not found for this organisation.", null);
+        }
+
+        if (watiJob.Source != WatiJobSource.Manual)
+        {
+            return (WorkerCommandStatus.Rejected,
+                $"{watiJob.Reference} was sent automatically after a check, before sends were limited to selected numbers; it cannot be retried. Select the numbers and send them again instead.",
+                watiJob.Id);
+        }
+
+        if (!JobStatusRules.CanRetryWati(watiJob.Status))
+        {
+            return (WorkerCommandStatus.Rejected,
+                $"{watiJob.Reference} is {watiJob.Status}; only a send that finished with failed messages can be retried.", watiJob.Id);
+        }
+
+        var requeued = await RequeueRetryableMessagesAsync(watiJob, cancellationToken);
+        if (requeued == 0)
+        {
+            return (WorkerCommandStatus.Rejected,
+                $"None of the failed messages of {watiJob.Reference} can be retried: WATI refused those numbers, or WhatsApp itself failed them.", watiJob.Id);
+        }
+
+        var message = $"{requeued} failed message(s) of {watiJob.Reference} are back in the queue (requested by {command.RequestedByName ?? "the web application"}).";
+        logger.LogInformation("{Message}", message);
+        await journal.EventAsync(new JournalEvent
+        {
+            EventCode = EventCodes.WatiJobRetried,
+            Message = message,
+            TenantId = watiJob.TenantId,
+            WatiJobId = watiJob.Id,
+            StepCode = StepCodes.WatiSendBatch,
+            Data = new { command.Reference, requeued },
+        }, cancellationToken);
+
+        return (WorkerCommandStatus.Completed, message, watiJob.Id);
+    }
+
+    private async Task<int> RequeueRetryableMessagesAsync(WatiJob watiJob, CancellationToken cancellationToken)
+    {
+        var now = time.GetUtcNow();
+        var retryable = RetryableWatiFailures.ToArray();
+        var requeued = await db.WatiMessages
+            .Where(m => m.WatiJobId == watiJob.Id && m.Status == WatiMessageStatus.Failed
+                        && m.FailedCode != null && retryable.Contains(m.FailedCode))
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(m => m.Status, WatiMessageStatus.Queued)
+                .SetProperty(m => m.WatiBatchId, (Guid?)null)
+                .SetProperty(m => m.RequestStatus, WatiRequestStatus.NotSent)
+                .SetProperty(m => m.FailedCode, (string?)null)
+                .SetProperty(m => m.FailedReason, (string?)null)
+                .SetProperty(m => m.FailedAtUtc, (DateTimeOffset?)null)
+                .SetProperty(m => m.ErrorMessage, (string?)null)
+                .SetProperty(m => m.CompletedAtUtc, (DateTimeOffset?)null)
+                .SetProperty(m => m.RetryCount, m => m.RetryCount + 1)
+                .SetProperty(m => m.UpdatedAtUtc, now), cancellationToken);
+
+        if (requeued > 0)
+        {
+            await WatiJobCounters.RefreshAsync(db, watiJob, cancellationToken);
+            watiJob.Status = WatiJobStatus.Queued;
+            watiJob.ErrorCode = null;
+            watiJob.ErrorMessage = null;
+            watiJob.CompletedAtUtc = null;
+            watiJob.NextAttemptAtUtc = now;
+            watiJob.UpdatedAtUtc = now;
+            await db.SaveChangesAsync(cancellationToken);
+        }
+
+        return requeued;
     }
 
     private async Task<(WorkerCommandStatus, string, Guid?)> SyncTemplatesAsync(CancellationToken cancellationToken)

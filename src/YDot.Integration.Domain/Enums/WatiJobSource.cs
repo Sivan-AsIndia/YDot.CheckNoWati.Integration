@@ -3,7 +3,10 @@ namespace YDot.Integration.Domain.Enums;
 /// <summary>Why a WATI job exists.</summary>
 public enum WatiJobSource
 {
-    /// <summary>Created by the pipeline after CheckNumber.ai verified the numbers of an uploaded file.</summary>
+    /// <summary>
+    /// Created by the pipeline after CheckNumber.ai verified the numbers of an uploaded file. RETIRED
+    /// on 15 October 2026 - a check no longer messages anybody - and kept only so older rows read.
+    /// </summary>
     Automatic,
 
     /// <summary>Requested from the Wati page (/app/whatsapp/wati) by a person choosing recipients and a template.</summary>

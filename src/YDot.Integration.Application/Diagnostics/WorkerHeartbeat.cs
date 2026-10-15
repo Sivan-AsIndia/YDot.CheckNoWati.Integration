@@ -4,6 +4,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using YDot.Integration.Application.Abstractions.Diagnostics;
 using YDot.Integration.Application.Abstractions.Persistence;
+using YDot.Integration.Application.Commands;
 using YDot.Integration.Application.Common;
 using YDot.Integration.Application.Options;
 using YDot.Integration.Domain.Entities;
@@ -73,10 +74,25 @@ public sealed class WorkerHeartbeat(
         var c = checkNumber.Value;
         var w = wati.Value;
         var p = pipeline.Value;
+        // As the recipient planner reads the allow-list: digits only, blanks dropped.
+        var allowList = w.EffectiveAllowedNumbers()
+            .Select(PhoneNumbers.PhoneNumberNormalizer.DigitsOnly)
+            .Where(digits => digits.Length > 0)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
 
         return new
         {
-            pipeline = new { p.EnableCheckNumber, p.EnableWati, p.AutoSendWati, p.AllowManualWatiBroadcasts },
+            pipeline = new
+            {
+                p.EnableCheckNumber,
+                p.EnableWati,
+
+                // Retired: a check never messages anybody, whatever the setting says.
+                autoSendWati = false,
+                p.AllowManualWatiBroadcasts,
+                sendsRequireSelection = true,
+            },
             checkNumber = new
             {
                 configured = !string.IsNullOrWhiteSpace(c.ApiKey),
@@ -85,6 +101,12 @@ public sealed class WorkerHeartbeat(
                 c.PollingIntervalSeconds,
                 c.MaxPollingAttempts,
                 c.MinimumNumbersPerTask,
+
+                // How many numbers the minimum charge pays for: CheckNumber.ai bills a 2-number task
+                // like a 500-number one, so a check should hold at least this many to get full value.
+                billableMinimumNumbers = c.PricePerNumberUsd > 0
+                    ? (int)Math.Ceiling(c.MinimumChargePerTaskUsd / c.PricePerNumberUsd)
+                    : 0,
                 c.MaxNumbersPerTask,
                 c.SplitTasksByCountry,
                 reuseScope = c.ReuseScope.ToString(),
@@ -102,12 +124,21 @@ public sealed class WorkerHeartbeat(
                 w.DefaultBroadcastName,
                 defaultParameters = w.DefaultParameters.Select(x => new { x.Name, x.Value }),
                 w.MaxRecipientsPerJob,
-                allowListActive = w.AllowedNumbers.Count > 0,
-                allowListSize = w.AllowedNumbers.Count,
+                allowListActive = allowList.Count > 0,
+                allowListSize = allowList.Count,
+
+                // A fingerprint of each allow-listed number (SHA-256 of its digits, lower-case hex), so the
+                // web application's review can mark the selected numbers the allow-list will hold back
+                // (NOT_IN_ALLOWLIST) without the numbers themselves being published.
+                allowListSha256 = allowList.Select(Fingerprint),
                 w.SkipAlreadyMessagedNumbers,
                 w.DuplicateWindowDays,
                 w.SendToUnverifiedNumbers,
                 statusSync = w.StatusSync.Enabled,
+
+                // The failure codes "retry this send" puts back in the queue, so the web application
+                // offers Retry only where the worker would act on it.
+                retryableFailureCodes = WorkerCommandProcessor.RetryableWatiFailures,
             },
             worker = new
             {
@@ -119,6 +150,9 @@ public sealed class WorkerHeartbeat(
             retry = new { retry.Value.MaxAttempts, retry.Value.InitialDelaySeconds, retry.Value.MaxDelaySeconds },
         };
     }
+
+    private static string Fingerprint(string digits) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(digits))).ToLowerInvariant();
 
     /// <summary>"919597304379" -> "91XXXXXX4379": enough to recognise the sender number, not to copy it.</summary>
     private static string? Mask(string? number) =>

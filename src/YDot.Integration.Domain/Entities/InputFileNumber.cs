@@ -41,6 +41,14 @@ public sealed class InputFileNumber : Entity, ITenantScoped
     /// <summary>The text exactly as it appeared in the file (OriginalNumber).</summary>
     public string RawValue { get; set; } = string.Empty;
 
+    /// <summary>
+    /// The person's name as the file gave it beside the number, when it did: the "Name" column of
+    /// a sheet with a heading row, otherwise the first text cell of the row ("Ravi Kumar, 98765
+    /// 43210") or the words around the number in the same cell ("Ravi 98765-43210"). Null when the
+    /// row held only digits. A template can address the person by it ({{name}}).
+    /// </summary>
+    public string? ContactName { get; set; }
+
     /// <summary>E.164 form (+919876543210); null for an invalid line.</summary>
     public string? NormalizedNumber { get; set; }
 

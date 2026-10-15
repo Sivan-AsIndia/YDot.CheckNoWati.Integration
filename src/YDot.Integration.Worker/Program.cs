@@ -65,6 +65,13 @@ try
     Log.Information("YDot.Integration worker starting ({Environment}). Settings file .env: {EnvFile}",
         builder.Environment.EnvironmentName, envFile ?? "(none found - using environment variables only)");
 
+    // A setting that no longer does anything should say so rather than be silently ignored.
+    if (builder.Configuration.GetValue<bool>("Pipeline:AutoSendWati"))
+    {
+        Log.Warning("Pipeline:AutoSendWati is set to true, but it is retired and ignored: a check only verifies numbers, "
+                    + "and WATI messages only the numbers a person selects on the WhatsApp Messages page. Remove the setting.");
+    }
+
     // ---- 4. Schema first, then the services ----------------------------------------------------------
     await host.Services.GetRequiredService<DatabaseMigrator>().MigrateAsync(CancellationToken.None);
 

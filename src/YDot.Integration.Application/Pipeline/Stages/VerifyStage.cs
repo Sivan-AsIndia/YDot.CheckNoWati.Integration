@@ -13,8 +13,9 @@ namespace YDot.Integration.Application.Pipeline.Stages;
 /// on - the fresh CheckNumber.ai answer, or the saved answer that was reused - and writes it onto
 /// the number rows (duplicates included) with a plain-language note for the report.
 ///
-/// Only numbers with WhatsApp = Yes go on to WATI; the WATI stage records why every other number
-/// was skipped.
+/// THIS IS WHERE A CHECK ENDS. The numbers with WhatsApp = Yes join the organisation's pool on the
+/// WhatsApp Messages page, where a person picks the ones to message; nothing is sent from here
+/// (until 15 October 2026 the job went on to message every one of them automatically).
 /// </summary>
 public sealed class VerifyStage(
     IIntegrationDbContext db,
@@ -141,8 +142,11 @@ public sealed class VerifyStage(
         job.WhatsAppYes = yes;
         job.WhatsAppNo = no;
         job.WhatsAppUnknown = unknown;
-        job.Status = job.RunWati ? IntegrationJobStatus.SendingWati : IntegrationJobStatus.GeneratingOutput;
-        job.CurrentStep = job.RunWati ? StepCodes.WatiPrepare : StepCodes.GenerateOutput;
+
+        // ALWAYS ON TO THE OUTPUT, whatever RunWati says. An older job may still carry RunWati =
+        // true from before automatic sending was retired; it is not messaged either.
+        job.Status = IntegrationJobStatus.GeneratingOutput;
+        job.CurrentStep = StepCodes.GenerateOutput;
         job.ConsecutiveFailures = 0;
         job.UpdatedAtUtc = time.GetUtcNow();
         await db.SaveChangesAsync(cancellationToken);
@@ -158,6 +162,17 @@ public sealed class VerifyStage(
             JobId = job.Id,
             StepCode = StepCodes.IdentifyVerified,
             Data = new { yes, no, unknown },
+        }, cancellationToken);
+        await journal.EventAsync(new JournalEvent
+        {
+            EventCode = EventCodes.NumbersReadyForSelection,
+            Message = yes > 0
+                ? $"{yes} WhatsApp number(s) are ready to be picked on the WhatsApp Messages page. Nothing was messaged."
+                : "No number of this file is on WhatsApp, so there is nothing to pick for a message.",
+            TenantId = job.TenantId,
+            JobId = job.Id,
+            StepCode = StepCodes.IdentifyVerified,
+            Data = new { yes },
         }, cancellationToken);
 
         return StageOutcome.Continue;

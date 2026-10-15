@@ -102,6 +102,7 @@ internal sealed class InputFileNumberConfiguration : IEntityTypeConfiguration<In
 
         builder.Property(x => x.SheetName).HasMaxLength(100).IsRequired();
         builder.Property(x => x.RawValue).HasMaxLength(500).IsRequired();
+        builder.Property(x => x.ContactName).HasMaxLength(120);
         builder.Property(x => x.NormalizedNumber).HasMaxLength(20);
         builder.Property(x => x.CountryCode).HasMaxLength(4);
         builder.Property(x => x.CountryIso).HasMaxLength(4);
@@ -119,6 +120,12 @@ internal sealed class InputFileNumberConfiguration : IEntityTypeConfiguration<In
         builder.HasIndex(x => x.InputFileId);
         builder.HasIndex(x => x.CheckNumberTaskId);
         builder.HasIndex(x => x.PhoneNumberId);
+
+        // THE SELECTION POOL: "this organisation's numbers that a check found on WhatsApp", which the
+        // WhatsApp Messages page filters, pages and picks from. Partial, so it holds only the Yes rows.
+        builder.HasIndex(x => new { x.TenantId, x.PhoneNumberId, x.CreatedAtUtc })
+            .HasDatabaseName("ix_int_input_file_numbers_verified_pool")
+            .HasFilter("final_whatsapp_status = 'Yes'");
 
         builder.HasOne<InputFile>().WithMany().HasForeignKey(x => x.InputFileId).OnDelete(DeleteBehavior.NoAction);
         builder.HasOne(x => x.PhoneNumber).WithMany().HasForeignKey(x => x.PhoneNumberId).OnDelete(DeleteBehavior.NoAction);

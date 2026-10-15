@@ -6,8 +6,8 @@ namespace YDot.Integration.Application.Pipeline;
 
 /// <summary>
 /// Drives one claimed job through as many stages as it can go right now: parse, check, verify,
-/// WATI, output - stopping when the job has to wait (CheckNumber.ai still processing, WATI still
-/// sending) or reaches a final status.
+/// output - stopping when the job has to wait (CheckNumber.ai still processing; an older job's
+/// automatic WATI send still going) or reaches a final status. A check never messages anybody.
 ///
 /// Each stage runs in its own DI scope, so a job with 50,000 numbers never accumulates tracked
 /// entities across stages, and the lease is renewed between stages so a long job is never taken

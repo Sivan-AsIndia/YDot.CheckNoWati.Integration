@@ -1,18 +1,30 @@
 # YDot.Integration
 
 A .NET 10 Worker Service that takes a file of mobile numbers, finds out which of them are on
-WhatsApp (CheckNumber.ai), sends a WhatsApp template message to those that are (WATI), and
-records every step in PostgreSQL.
+WhatsApp (CheckNumber.ai), and keeps the verified numbers for a person to choose from. It sends a
+WhatsApp template message (WATI) **only to the numbers a person selects** on the web page - ten or
+fifty out of the hundreds a check verified - and records every step in PostgreSQL.
 
 ```
-number file ──► saved to the database ──► already checked? ──► CheckNumber.ai ──► result file
-                                                │ yes (not paid for again)            │
-                                                ▼                                     ▼
-                              completed output ◄── WATI template message ◄── numbers on WhatsApp
+number file ──► saved to the database ──► already checked? ──► CheckNumber.ai ──► verified numbers
+                                                │ yes (not paid for again)               │
+                                                ▼                                        ▼
+                                         completed output            a person picks 10-50 of them on
+                                                                     WhatsApp Messages, a template
+                                                                     and its values, and reviews
+                                                                                 │
+                                                  WATI template message ◄────────┘  (only those)
 ```
+
+**A check never messages anybody.** Until 15 October 2026 a finished check sent a message to every
+verified number on its own (`Pipeline:AutoSendWati`); with 450 valid numbers out of 500, 450
+messages would have gone out. That is retired: the setting is ignored, and every send is a person's
+selection, capped per send, reviewed before it is queued and traced back to the check each number
+came from.
 
 It runs beside the YDot web application and shares its database (`ydotphaseupdated`). The web
-pages `/app/whatsapp/check-number` and `/app/whatsapp/wati` show what this worker records.
+pages `/app/whatsapp/check-number` (Number Verification) and `/app/whatsapp/wati` (WhatsApp
+Messages: Send message, Groups, Send log, Delivered & read) show and drive what this worker does.
 
 ---
 
@@ -51,16 +63,17 @@ pages `/app/whatsapp/check-number` and `/app/whatsapp/wati` show what this worke
 | 5. The rest is checked | The new numbers go to CheckNumber.ai as one task. The task id is stored before anything else happens. | `int_checknumber_tasks` |
 | 6. The task is polled | Every 30 seconds (configurable) until its status is `exported`. Between polls the job is parked; the worker is free for other jobs. | `int_checknumber_task_polls` |
 | 7. The result is fetched | The result archive is downloaded, unpacked and read. | `int_checknumber_result_files`, `int_checknumber_results` |
-| 8. Verified numbers are picked | Every number now has a final answer: Yes, No or Unknown. | `final_whatsapp_status` |
-| 9. WATI sends | A template message goes to the numbers on WhatsApp, in batches. Everybody left out gets a reason. | `int_wati_jobs`, `int_wati_batches`, `int_wati_messages` |
-| 10. Output is written | A results CSV and a summary JSON, per job. | `data/output/{job}/` |
+| 8. Numbers are verified | Every number now has a final answer: Yes, No or Unknown. A name found beside a number, or in a Name column, is kept with it. | `final_whatsapp_status`, `contact_name` |
+| 9. Output is written | A results CSV and a summary JSON, per job. The job ends here: **nothing is sent**. Its Yes numbers join the organisation's pool on WhatsApp Messages (event `NUMBERS_READY_FOR_SELECTION`). | `data/output/{job}/` |
+| 10. A person sends | On WhatsApp Messages a person filters the pool, selects the numbers, picks an approved template, fills its values (typed once, or each recipient's own name or number), reviews exactly who will and will not be messaged, and confirms. | `int_worker_commands` (`SendWatiBroadcast`) |
+| 11. WATI sends the selection | The worker re-applies the sending rules to the selection, then sends in batches. Every selected number is accounted for: sent, skipped with a reason, or left out with a reason - each traced to the check it came from. | `int_wati_jobs`, `int_wati_batches`, `int_wati_messages` |
 
 Everything the worker does is also written as a step (`int_job_steps`), as an event
 (`int_job_events`) and, for every HTTP call, as a request/response record (`int_api_call_logs`).
 
 **Each part can be switched off.** `Pipeline:EnableCheckNumber` and `Pipeline:EnableWati` decide
-which stages run - check only, check then message, or check now and message later from the Wati
-page. See [Settings](#5-settings).
+whether checks and sends can happen at all, and `Pipeline:AllowManualWatiBroadcasts` whether the
+page may send. See [Settings](#5-settings).
 
 ---
 
@@ -142,14 +155,15 @@ Both take exactly the same path from there on. Folder drops can be switched off 
 ### 3.3 The job's states
 
 ```
-Queued ─► Parsing ─► CheckingNumbers ─► Verifying ─► SendingWati ─► GeneratingOutput ─► Completed
-                                                                                    └─► CompletedWithErrors
+Queued ─► Parsing ─► CheckingNumbers ─► Verifying ─► GeneratingOutput ─► Completed
         any state ─► Failed        (can be retried)
         any state ─► Cancelled     (can be retried)
 ```
 
-`CompletedWithErrors` means the check finished but WATI turned the messages down. It can be
-retried too; only the failed messages are tried again.
+A check goes straight from Verifying to GeneratingOutput. `SendingWati` and `CompletedWithErrors`
+only appear on jobs from before 15 October 2026, whose check started an automatic WATI send:
+such a job waits for that send to finish, and ends `CompletedWithErrors` when it failed. Retry
+resumes a failed or cancelled check from where it stopped and never starts a send.
 
 ### 3.4 Phone numbers
 
@@ -165,6 +179,21 @@ before starting and the job's own counts always agree:
 | `12345` | invalid: "Too short (5 digits)" |
 
 Both the original text (`raw_value`) and the normalised number (`normalized_number`) are stored.
+
+**Names.** A name is kept with each number when the file holds one (`contact_name`, at most 120
+characters), so a message can greet each person by name (`Application/PhoneNumbers/ContactNameReader.cs`).
+It is cautious - a wrong name in "Dear {{name}}" is worse than none, and a send falls back to the
+value the person typed ("Friend"):
+
+1. A sheet whose first line is a heading (text, no digits): the column headed as a name - `Name`,
+   `Full name`, `Donor name`, or `First name` + `Last name` joined - and nothing else. A heading
+   that names something else (`Company name`, `City name`, `Campaign name`) is not a person.
+2. No heading line: the first cell of the row with letters and no digits
+   (`Ravi Kumar, Chennai, 98765 43210` gives `Ravi Kumar`).
+3. Otherwise the words around the number in its own cell (`Ravi 98765-43210` gives `Ravi`),
+   leaving out labels such as `Mob:` or `Ph.`.
+
+E-mail addresses, links and placeholders (`n/a`, `-`, `nil`) are never names.
 
 ---
 
@@ -183,9 +212,12 @@ src/
 | If you want to change... | Look in |
 |---|---|
 | How numbers are recognised | `Application/PhoneNumbers/` |
-| What happens to a job at each stage | `Application/Pipeline/Stages/` (`ParseStage`, `CheckNumberStage`, `VerifyStage`, `WatiStage`, `OutputStage`) |
+| What happens to a job at each stage | `Application/Pipeline/Stages/` (`ParseStage`, `CheckNumberStage`, `VerifyStage`, `OutputStage`; `WatiStage` only waits for an older job's automatic send) |
+| How a name is found beside a number | `Application/PhoneNumbers/ContactNameReader.cs` |
+| How a person's selection becomes a send | `Application/Wati/WatiJobFactory.cs` (left out: `INVALID_NUMBER`, `DUPLICATE_IN_JOB`, `NOT_IN_POOL`; source check per number; values per recipient) |
 | Who gets a WATI message | `Application/Wati/WatiRecipientPlanner.cs` |
 | How batches are sent | `Application/Wati/WatiJobSender.cs` |
+| Retrying a send's failed messages | `Application/Commands/WorkerCommandProcessor.cs` (`RetryWatiJob`, `RetryableWatiFailures`) |
 | The retry rule | `Application/Retry/RetryExecutor.cs`, `Application/Common/TransientErrors.cs` |
 | The CheckNumber.ai and WATI requests | `Infrastructure/ExternalApis/` |
 | A table or a column | `Domain/Entities/`, `Infrastructure/Persistence/Configurations/`, then add a migration |
@@ -200,7 +232,7 @@ The seven background services (`Worker/Services/`):
 | `WatiDispatchWorker` | 5 s | Sends queued WATI batches |
 | `WatiStatusSyncWorker` | 30 s | Asks WATI whether accepted messages were sent, delivered, read |
 | `WatiTemplateSyncWorker` | 60 min | Copies the approved template list from WATI |
-| `CommandWorker` | 3 s | Carries out requests from the web pages (retry, stop, broadcast) |
+| `CommandWorker` | 3 s | Carries out requests from the web pages (retry or stop a check, send a selection, retry a send's failures) |
 | `HeartbeatWorker` | 30 s | Says "I am alive" and publishes its non-secret settings |
 
 There are no unit or integration test projects yet. That was a deliberate decision for this
@@ -223,8 +255,8 @@ the section: `Wati:BatchSize` becomes `Wati__BatchSize=50`.
 | `ConnectionStrings__IntegrationDatabase` | The `ydotphaseupdated` database. From your machine: `Host=localhost;Port=6710;...`. Inside Docker the compose file sets `Host=ydot-postgres;Port=5432;...`. |
 | `CheckNumber__ApiKey` | The CheckNumber.ai `X-API-Key` |
 | `Wati__TenantId`, `Wati__ApiToken`, `Wati__ChannelNumber` | The WATI account, its bearer token and the sending number - see [12.0](#120-the-connection-details) for where to find each |
-| `Wati__AllowedNumbers__0`, `__1`, ... | **Test safety.** While any are set, only these numbers are ever messaged |
-| `Wati__MaxRecipientsPerJob` | **Test safety.** The most messages one WATI job may send (0 = no limit) |
+| `Wati__AllowedNumbers__0`, `__1`, ... | **Test safety.** While any are set, only these numbers are ever messaged; every other selected number is recorded as skipped (`NOT_IN_ALLOWLIST`), and the review on the page says the allow-list is on |
+| `Wati__MaxRecipientsPerJob` | The most numbers one send may message (0 = no limit). The page lets a person select at most this many; see [5.4](#54-wati) |
 
 A variable already set in the environment always wins over `.env`.
 
@@ -234,8 +266,8 @@ A variable already set in the environment always wins over `.env`.
 |---|---|---|
 | `EnableCheckNumber` | `true` | `false`: numbers are read and saved, nothing is sent to CheckNumber.ai |
 | `EnableWati` | `true` | `false`: nothing is ever sent to WATI |
-| `AutoSendWati` | `true` | `false`: the check finishes and stops; messages are sent only from the Wati page |
-| `AllowManualWatiBroadcasts` | `true` | `false`: the Wati page cannot send |
+| `AllowManualWatiBroadcasts` | `true` | `false`: the WhatsApp Messages page cannot send |
+| ~~`AutoSendWati`~~ | - | **Retired on 15 October 2026 and ignored.** A check only verifies numbers. If it is still set to `true`, the worker logs a warning at start ("...is retired and ignored...") and messages nobody. Remove it from `.env` and compose files. |
 
 ### 5.3 `CheckNumber`
 
@@ -247,6 +279,7 @@ A variable already set in the environment always wins over `.env`.
 | `MaxPollingAttempts` | `20` | After this many polls the job fails with `CHECKNUMBER_POLL_TIMEOUT` (retrying it polls the **same** task again) |
 | `PollingBackoffMultiplier` | `1.0` | Above 1, each wait grows, up to `MaxPollingIntervalSeconds` |
 | `MaxNumbersPerTask` | `50000` | A larger file is split into several tasks |
+| `MinimumNumbersPerTask` | `1` | A check with fewer new numbers than this is refused when the file is read (the upload page says so before anything is uploaded). CheckNumber.ai itself accepts small tasks but **bills every task as at least 500 numbers** (`MinimumChargePerTaskUsd / PricePerNumberUsd`), and the upload review says so. Set this to `500` if small checks should not run at all |
 | `SplitTasksByCountry` | `false` | `true`: one task per country. See [section 11](#11-checknumberai-as-it-actually-behaves) |
 | `ReuseScope` | `Global` | `Global`: a saved answer is reused for every organisation. `Tenant`: only for the organisation that paid for it |
 | `ResultValidityDays` | `0` | Above 0, an answer older than this is checked again |
@@ -258,10 +291,11 @@ A variable already set in the environment always wins over `.env`.
 |---|---|---|
 | `BatchSize` | `100` | Messages per request. 430 numbers go as 100, 100, 100, 100, 30 |
 | `DelayBetweenBatchesMilliseconds` | `1000` | Pause between batches |
-| `DefaultTemplateName`, `DefaultBroadcastName`, `DefaultParameters` | `l4l_001`, `l4l_001`, `image_url` | Used when an upload does not name its own |
-| `MaxRecipientsPerJob` | `5` | Safety cap. **Raise it on purpose for production** |
-| `AllowedNumbers` | empty | Test allow-list |
+| `DefaultTemplateName`, `DefaultBroadcastName`, `DefaultParameters` | `l4l_001`, `l4l_001`, `image_url` | The template the send page offers first, until the person picks one |
+| `MaxRecipientsPerJob` | `50` | The most numbers **one send** may message. The page will not select more, CAM refuses a larger send ("One send may message at most 50 numbers; 51 are selected..."), and the worker skips any beyond it (`MAX_RECIPIENTS_REACHED`). The effective limit is the smaller of this and CAM's `WhatsAppIntegration:MaxRecipientsPerSend` (1,000). Was 5 until 15 October 2026 |
+| `AllowedNumbers` | empty | Test allow-list (see [5.1](#51-env---secrets-and-per-machine-values)) |
 | `SkipAlreadyMessagedNumbers` | `true` | The same template is not sent twice to the same number for the same campaign |
+| `DuplicateWindowDays` | `0` | With the rule above: only look back this many days (0 = ever) |
 | `SendToUnverifiedNumbers` | `false` | `true`: also message numbers CheckNumber.ai could not verify |
 | `ResendWhenDeliveryUnknown` | `false` | See [section 9](#9-surviving-restarts-and-failures) |
 | `Templates` | one entry | Templates offered while WATI's own list cannot be read |
@@ -365,7 +399,7 @@ organisation names from `iam_tenants`.
 |---|---|---|
 | `int_input_files` | File that arrived | `content_sha256`, `dedupe_key` (unique), `status` (Registered / Duplicate / Rejected), `campaign_id`, `uploaded_by_name`, `stored_file_path` |
 | `int_integration_jobs` | Registered file | `job_number`, `status`, `current_step`, the counts (`fresh_numbers`, `reused_numbers`, `whatsapp_yes`...), `estimated_cost`, `actual_cost`, `error_code`, `locked_by`, `locked_until_utc`, `next_attempt_at_utc` |
-| `int_input_file_numbers` | Number (or bad line) found in the file | `raw_value`, `normalized_number`, `classification` (Fresh / AlreadyChecked / Duplicate / Invalid), `invalid_reason`, `reused_whatsapp_status`, `final_whatsapp_status`, `result_note` |
+| `int_input_file_numbers` | Number (or bad line) found in the file | `raw_value`, `normalized_number`, `contact_name` (the name read from the file, or null), `classification` (Fresh / AlreadyChecked / Duplicate / Invalid), `invalid_reason`, `reused_whatsapp_status`, `final_whatsapp_status`, `result_note`. The partial index `ix_int_input_file_numbers_verified_pool` (`tenant_id, phone_number_id, created_at_utc` where `final_whatsapp_status = 'Yes'`) serves the page's pool of numbers to pick from |
 
 **The registry**
 
@@ -386,9 +420,9 @@ organisation names from `iam_tenants`.
 
 | Table | One row per | Notable columns |
 |---|---|---|
-| `int_wati_jobs` | Broadcast | `reference`, `source` (Automatic / Manual), `integration_job_id`, `campaign_id`, `template_name`, `broadcast_name`, `parameters_json`, the counts |
+| `int_wati_jobs` | Send (broadcast) | `reference`, `source` (Manual; Automatic only on rows from before 15 Oct 2026), `integration_job_id` (older automatic sends only), `command_id`, `campaign_id`, `template_name`, `broadcast_name`, `parameters_json` (typed values), the counts, and - added 15 Oct 2026 - `requested_count` (numbers the person selected), `excluded_json` (selected numbers left out: `[{number, reason, detail}]`), `template_body` and `template_header_json` (the template as it was approved when sent), `parameter_bindings_json` (values filled per recipient: `[{name, source}]`, source `contactName` / `phoneNumber`), `recipient_group_id` / `recipient_group_name` (the group the selection came from, kept even if the group is deleted), `tags_json` |
 | `int_wati_batches` | Request to WATI | `batch_number`, `status`, `http_status_code`, `request_payload_json`, `response_body`, `duration_ms` |
-| `int_wati_messages` | Number in a broadcast | `whatsapp_number`, `status`, `skip_reason`, `request_status`, `local_message_id` (unique), `wati_response_json`, `retry_count`, `sent_at_utc`, `delivered_at_utc`, `read_at_utc` |
+| `int_wati_messages` | Number in a send | `whatsapp_number`, `status`, `skip_reason`, `request_status`, `local_message_id` (unique), `parameters_json` (this recipient's own values), `wati_response_json`, `retry_count`, `sent_at_utc`, `delivered_at_utc`, `read_at_utc`, `checknumber_task_id` / `checknumber_provider_task_id` (the task that checked the number), and - added 15 Oct 2026 - `source_job_id` / `source_job_number` (the check the number was picked from) and `contact_name` |
 | `int_wati_templates` | Template | `element_name`, `body`, `parameters_json`, `source` (Wati / Configuration) |
 
 **Audit and operations**
@@ -402,6 +436,20 @@ organisation names from `iam_tenants`.
 | `int_worker_commands` | Request from the web pages | `command_type`, `status`, `payload_json`, `result_message` |
 | `int_job_sequences` | Day | The counter behind `INT-20261010-000001` |
 
+**Owned by the Campaign service, not by this worker.** Recipient groups are the web application's
+own data, in its own migrations: `cam_whatsapp_recipient_groups` (name unique per organisation,
+`description`, `campaign_id`, `tags` text[], audit columns and `version`) and
+`cam_whatsapp_recipient_group_members` (`group_id`, `phone_e164` unique per group,
+`source_job_id` / `source_job_number` - the check the number was picked from - `contact_name`,
+`added_at_utc`, `added_by_name`). A send only copies the group's id and name into
+`int_wati_jobs`; the worker never reads the `cam_` tables. Whether a member is still on WhatsApp
+is read from the worker's tables every time a group is shown or used.
+
+**Every new column is documented in the database** (`COMMENT ON COLUMN`), so `\d+ int_wati_jobs`
+in psql explains it. The migration `20261015012611_SelectionDrivenWatiSends` also fills
+`source_job_id` / `source_job_number` on older messages from their job, and `requested_count` on
+older sends from `total_recipients`.
+
 ### 7.2 How they join
 
 ```
@@ -411,16 +459,23 @@ int_input_files 1───1 int_integration_jobs 1───* int_input_file_numb
                               │            ├───* int_checknumber_task_polls
                               │            └───1 int_checknumber_result_files
                               │
-                              ├───* int_wati_jobs 1───* int_wati_batches
-                              │            └────────* int_wati_messages *───1 int_phone_numbers
+                              ├─ ─ ─* int_wati_messages.source_job_id   (the check a sent number came from)
                               │
                               ├───* int_job_steps
                               ├───* int_job_events
                               └───* int_api_call_logs
+
+int_worker_commands (SendWatiBroadcast) 1───1 int_wati_jobs 1───* int_wati_batches
+                                                   └────────* int_wati_messages *───1 int_phone_numbers
 ```
 
+A send is not a child of a check: it is created by a person's request (`command_id`) and may mix
+numbers from several checks. Each message points to its check with `source_job_id` - a plain
+column with an index, not a foreign key, so deleting an old check never deletes the record of a
+send. (Older automatic sends also carry `integration_job_id`.)
+
 **The campaign link.** `campaign_id` is on the file, the job, the WATI job and every WATI
-message. That is what lets the campaign's page show its own checks and broadcasts.
+message. That is what lets the campaign's page show its own checks and sends.
 
 ### 7.3 Template parameters need no schema change
 
@@ -448,11 +503,28 @@ from int_api_call_logs
 where job_id = (select id from int_integration_jobs where job_number = 'INT-20261010-000001')
 order by started_at_utc;
 
--- Why each number was or was not messaged
+-- Why each number of a send was or was not messaged
 select status, coalesce(skip_reason, failed_code) as reason, count(*)
 from int_wati_messages
-where integration_job_id = (select id from int_integration_jobs where job_number = 'INT-20261010-000001')
+where wati_job_id = (select id from int_wati_jobs where reference = 'WAT-20261015-000003')
 group by 1, 2;
+
+-- ... and the numbers the person selected that were left out before any message was made
+select e->>'number' as number, e->>'reason' as reason, e->>'detail' as detail
+from int_wati_jobs, jsonb_array_elements(coalesce(excluded_json, '[]'::jsonb)) e
+where reference = 'WAT-20261015-000003';
+
+-- Every send that used numbers from a check, with how many
+select w.reference, w.broadcast_name, w.template_name, w.requested_by_name, count(*) as numbers
+from int_wati_messages m join int_wati_jobs w on w.id = m.wati_job_id
+where m.source_job_number = 'INT-20261015-000001'
+group by 1, 2, 3, 4 order by min(w.created_at_utc);
+
+-- One message, end to end: check, CheckNumber.ai task, send, template, outcome
+select m.whatsapp_number, m.contact_name, m.source_job_number, m.checknumber_provider_task_id,
+       w.reference, w.template_name, m.status, coalesce(m.skip_reason, m.failed_code) as reason
+from int_wati_messages m join int_wati_jobs w on w.id = m.wati_job_id
+where m.whatsapp_number = '916000000001' order by m.queued_at_utc;
 
 -- What CheckNumber.ai has cost
 select date_trunc('day', created_at_utc) as day, count(*) as tasks, sum(actual_amount) as usd
@@ -621,14 +693,20 @@ written to a log, a table or this file.
   "receivers": [
     { "whatsappNumber": "919500873627",
       "localMessageId": "ydot-01a125b7d68071b3a1591a77e426b8f1",
-      "customParams": [{ "name": "image_url", "value": "https://.../blind_stick_cam1.jpg" }] }
+      "customParams": [{ "name": "name", "value": "Asha Menon" },
+                       { "name": "image_url", "value": "https://.../blind_stick_cam1.jpg" }] }
   ]
 }
 ```
 
-Nothing here is hard-coded. The template, the broadcast name and the parameters come from, in
-order: the upload (its manifest), else the `Wati:Default...` settings. A broadcast sent from the
-Wati page carries its own.
+Nothing here is hard-coded. The template, the send name and every value come from the send a
+person made on the page. A value is either **typed once** for everybody (`image_url` above) or
+**filled per recipient** from the number's own record: `contactName` (the name read from the file,
+with the typed value as the fallback when there is none - "Dear Friend") or `phoneNumber`
+(`+91...`). Each message stores its own values (`int_wati_messages.parameters_json`), and the send
+stores the rule (`parameter_bindings_json`) and the template wording as it was approved at that
+moment (`template_body`, `template_header_json`), so the send log shows exactly what each person
+read even if the template is edited in WATI later.
 
 `localMessageId` is created by the worker, one per recipient. It is how an answer is matched to
 a number, and how a message is found again at WATI after a lost response.
@@ -642,25 +720,50 @@ not validated itself - most of them - and sends the message anyway. This was fou
 
 ### 12.2 Who gets a message
 
-Applied in this order. Everyone left out is stored as `Skipped` with the reason.
+**Only the numbers a person selected**, and of those only the ones that pass every rule. Every
+selected number is accounted for, with its reason.
+
+First the selection itself is checked (`WatiJobFactory`). A number that fails here is **left out**:
+it gets no message row, and is listed in `int_wati_jobs.excluded_json`.
+
+| Rule | Reason stored |
+|---|---|
+| Not a phone number | `INVALID_NUMBER` |
+| Selected twice | `DUPLICATE_IN_JOB` (messaged once) |
+| Not a number any check of this organisation has answered | `NOT_IN_POOL` |
+
+Then the sending rules (`WatiRecipientPlanner`), in this order. A number that fails here is stored
+as a `Skipped` message with the reason:
 
 | # | Rule | Reason stored |
 |---|---|---|
-| 1 | Not on WhatsApp | `WHATSAPP_NOT_AVAILABLE` |
+| 1 | Not on WhatsApp (as the registry says now, not when it was picked) | `WHATSAPP_NOT_AVAILABLE` |
 | 2 | CheckNumber.ai could not tell | `WHATSAPP_UNVERIFIED` |
 | 3 | An allow-list is set and the number is not on it | `NOT_IN_ALLOWLIST` |
-| 4 | This template was already sent to this number for this campaign | `ALREADY_SENT` |
-| 5 | The cap for one job is reached | `MAX_RECIPIENTS_REACHED` |
+| 4 | This template was already sent to this number for this campaign (within `DuplicateWindowDays`, 0 = ever) | `ALREADY_SENT` |
+| 5 | The cap for one send is reached | `MAX_RECIPIENTS_REACHED` |
 
-A broadcast from the Wati page goes through the same five rules. A number asked for there that
-is not one of the organisation's verified numbers is left out altogether (`NOT_IN_POOL`).
+**The page shows all of this before anything is queued.** "Review & send" asks CAM to apply the
+same rules to the selection (`POST wati/broadcasts/review`) and lists each number as Will be sent,
+Skipped or Left out, with the message that person will read. The worker applies the rules again
+when it creates the send, so a number messaged in between is still skipped. For the allow-list the
+heartbeat publishes a SHA-256 fingerprint of each allowed number's digits (`allowListSha256`), never
+the numbers, and the review compares fingerprints to mark `NOT_IN_ALLOWLIST` per number.
+
+**Traceability.** Each message records the check the number was picked from (`source_job_id`,
+`source_job_number`), the CheckNumber.ai task that checked it (`checknumber_task_id`,
+`checknumber_provider_task_id`), the send, the template and the outcome. The worker's journal
+holds the event `WATI_JOB_CREATED` with the requested count, the left-out counts by reason, the
+source checks, the group, the tags and the safety settings in force.
 
 ### 12.3 What is recorded for each number
 
-Integration job, CheckNumber.ai task id, WATI job, number, template, broadcast, request status
-(`NotSent` / `Accepted` / `Rejected` / `Uncertain`), HTTP status, WATI's answer, retry count,
-error, started, completed, duration - and then sent, delivered, read and replied times as WATI
-reports them.
+The check it was picked from (`source_job_id`, `source_job_number`), the CheckNumber.ai task that
+checked it, the send, the number and the name read from the file, the template, the send name,
+this person's own template values, request status (`NotSent` / `Accepted` / `Rejected` /
+`Uncertain`), HTTP status, WATI's answer, retry count, error, started, completed, duration - and
+then sent, delivered, read and replied times as WATI reports them. A selected number that was left
+out has no message row; it is listed with its reason in the send's `excluded_json`.
 
 ### 12.4 Delivery status
 
@@ -677,8 +780,33 @@ webhooks; see [Known limits](#18-known-limits-and-next-steps).
 
 1. Make sure the token is current (see [12.0](#120-the-connection-details)).
 2. Remove the `Wati__AllowedNumbers__*` lines.
-3. Set `Wati__MaxRecipientsPerJob` to `0` or to the largest broadcast you intend.
-4. Restart the worker. The Wati page shows the limits it is running with.
+3. Set `Wati__MaxRecipientsPerJob` to the largest send you intend (the default is 50; the request
+   behind this design was 10-50 people per send).
+4. Remove `Pipeline__AutoSendWati` if it is still there (it is ignored, but logs a warning).
+5. Recreate the worker container (`docker compose up -d --force-recreate`). The page shows the
+   limit it is running with ("at most 50 per send").
+
+### 12.6 Retrying a send
+
+A send whose messages failed because of WATI itself can be tried again from the send log
+("Retry N failed"). Only **sends made by a person** qualify (never an older automatic send), only
+when the send ended `Failed` or `CompletedWithErrors`, and only these failures are requeued:
+
+| Code | Meaning |
+|---|---|
+| `WATI_UNAUTHORIZED` | WATI refused the token |
+| `WATI_UNAVAILABLE` | WATI stayed unavailable through every retry |
+| `WATI_DELIVERY_UNCERTAIN` | A request was sent, the answer was lost, and WATI had no record of the message |
+| `WATI_NOT_CONFIGURED` | The worker had no WATI settings |
+| `WATI_REJECTED` | WATI refused the whole request |
+
+A number WATI refused on its own (`WATI_INVALID_NUMBER`) or a failure reported later by WhatsApp
+(for example `131026`) is not retried: sending again would fail the same way or reach a phone that
+already declined. The retry is a worker command (`RetryWatiJob`), recorded as `WATI_JOB_RETRIED`
+with who asked. The message rows already exist and only go from Failed back to Queued: nothing
+WATI accepted is sent again, nobody outside the original selection is added, and each message
+keeps its `localMessageId`. (`WATI_DELIVERY_UNCERTAIN` is only recorded after WATI was asked about
+that `localMessageId` and had no record of it.)
 
 ---
 
@@ -689,41 +817,78 @@ worker's tables, through the Campaign service (CAM) of `D:\Permaspace\Ydot-Goldw
 
 ```
 Browser ──► nginx ──► Campaign API ──┬── reads   int_* tables (same database)
- /app/whatsapp/...   /cam-api/v1/    ├── writes  {data}/inbox/UPL-....csv + .manifest.json
-                     whatsapp/...    └── inserts int_worker_commands   (retry, stop, broadcast)
-                                                         │
+ /app/whatsapp/...   /cam-api/v1/    ├── owns    cam_whatsapp_recipient_groups (+ _members)
+                     whatsapp/...    ├── writes  {data}/inbox/UPL-....csv + .manifest.json
+                                     └── inserts int_worker_commands   (retry/stop a check, send a
+                                                         │              selection, retry a send)
                                           this worker ◄──┘  does the work
 ```
 
-The Campaign API never calls CheckNumber.ai or WATI and holds neither key.
+The Campaign API never calls CheckNumber.ai or WATI and holds neither key. Since 15 October 2026
+an upload's manifest says `runWati: false` and carries no template: a check cannot start a send.
+
+**The pages.** Communications → **Number Verification** (`/app/whatsapp/check-number`): upload,
+review (with the 500-number billing note), live check, jobs, the job page with its report, its
+downloads, a "Choose numbers to message" link and the list of sends made from that check.
+Communications → **WhatsApp Messages** (`/app/whatsapp/wati`), four tabs:
+
+| Tab | Route | What a person does there |
+|---|---|---|
+| Send message | `/app/whatsapp/wati` | 1 Numbers: the pool of verified numbers (server-side search, filters by check, country, group, tag, history; paging), select by row, page or "first N matching", save or add to a group. 2 Template: an approved template, values typed or taken per recipient, send name, campaign, tags, phone preview "as" any selected person. 3 Review & send: Will be sent / Skipped / Left out with reasons and each person's message, then confirm. |
+| Groups | `/app/whatsapp/wati/groups` | Saved selections: search, tag filter, members with "still on WhatsApp", remove members, edit, delete, "Use for a send" |
+| Send log | `/app/whatsapp/wati/send-log` | Every send: status tabs, search, template / group / date filters, CSV export; a send's drawer with figures, values, template as sent, every selected number with its check, task and outcome, the worker's events, Retry and per-send export |
+| Delivered & read | `/app/whatsapp/wati/report` | The delivery funnel and each message's journey |
+
+Query parameters open a page in a state: `?job=<job>` (pool narrowed to a check), `?group=<id>`
+(a group selected), `?send=<id>` on the send log (that send's drawer).
 
 ### 13.1 Endpoints (`/cam-api/v1/whatsapp/...`)
 
-| Method and path | For |
-|---|---|
-| `GET overview` | Totals, whether the worker is running, its limits and prices |
-| `POST numbers/lookup` | "Which of these numbers already have an answer?" - the upload review |
-| `POST check-jobs` | Upload a file (multipart: `file`, `campaignId`, `forceRecheck`, optional `watiTemplateName`, `watiBroadcastName`, `watiParameters`) |
-| `GET uploads/{reference}` | Has the worker turned the upload into a job yet |
-| `GET check-jobs`, `GET check-jobs/{job}` | The jobs list; one job with its tasks, timeline and WATI outcome |
-| `GET check-jobs/{job}/results`, `/invalid-lines` | The report |
-| `GET check-jobs/{job}/files/{kind}` | Downloads: `original`, `submitted`, `results`, `raw`, `invalid`, `summary` |
-| `POST check-jobs/{job}/retry`, `/cancel` | Leave a request for the worker |
-| `GET wati/templates`, `wati/recipients`, `wati/broadcasts`, `wati/messages` | The Wati page |
-| `POST wati/broadcasts` | Send a broadcast |
-| `POST wati/templates/refresh` | Read the template list from WATI again |
-| `GET commands/{reference}` | What became of a request |
+| Method and path | Permission | For |
+|---|---|---|
+| `GET overview` | view | Totals, whether the worker is running, its limits (`maxRecipientsPerSend`, allow-list), prices, billable minimum |
+| `POST numbers/lookup` | view | "Which of these numbers already have an answer?" - the upload review |
+| `POST check-jobs` | operate | Upload a file (multipart: `file`, `campaignId`, `forceRecheck`) |
+| `GET uploads/{reference}` | view | Has the worker turned the upload into a job yet |
+| `GET check-jobs`, `GET check-jobs/{job}` | view | The jobs list; one job with its tasks, timeline and the sends made from it |
+| `GET check-jobs/{job}/results`, `/invalid-lines` | view | The report (with each number's name and last send) |
+| `GET check-jobs/{job}/files/{kind}` | view | Downloads: `original`, `submitted`, `results`, `raw`, `invalid`, `summary` |
+| `POST check-jobs/{job}/retry`, `/cancel` | operate | Leave a request for the worker |
+| `GET wati/templates` | view | Approved templates with header, media variable, footer and buttons |
+| `POST wati/templates/refresh` | operate | Read the template list from WATI again |
+| `GET wati/recipients` | view | The pool of verified numbers, paged and filtered on the server, with facets |
+| `GET wati/recipients/matching` | view | The first N numbers matching the filters ("Select the first 50 of 534") |
+| `GET wati/groups`, `GET wati/groups/{id}` | view | Recipient groups; one group with its members |
+| `POST wati/groups`, `PUT wati/groups/{id}`, `DELETE wati/groups/{id}` | operate | Create (name unique per organisation), edit (with `expectedVersion`), delete |
+| `POST wati/groups/{id}/members`, `/members/remove` | operate | Add or remove members |
+| `POST wati/broadcasts/review` | view | Apply the sending rules to a selection without sending: figures, problems, every number's outcome and message |
+| `POST wati/broadcasts` | operate | Send a selection: `templateName`, `broadcastName`, `values`, `selection` [{`number`, `sourceJobId`}], `bindings` [{`name`, `source`}], `campaignId`, `recipientGroupId`, `tags` |
+| `GET wati/broadcasts` | view | The send log: paged, filtered, with status counts |
+| `GET wati/broadcasts/export` | view | The send log as CSV, one row per selected number (audited) |
+| `GET wati/broadcasts/{id}`, `GET wati/broadcasts/{id}/export` | view | One send in full; as CSV (audited) |
+| `POST wati/broadcasts/{id}/retry` | operate | Retry a send's retryable failures |
+| `GET wati/messages` | view | Messages for the delivery report |
+| `GET commands/{reference}` | view | What became of a request |
 
-`{job}` is the job number (`INT-20261010-000001`) or its id.
+`{job}` is the job number (`INT-20261010-000001`) or its id. A send is refused with a sentence
+when it is larger than the cap ("One send may message at most 50 numbers; 51 are selected..."),
+when the template is not approved, or when the worker cannot send. Every answer is limited to the
+caller's own organisation, and every action names only the actions the caller may take
+(`permittedActions`), so the page never shows a button that would be refused.
 
 ### 13.2 Who may do what
 
-| | Permission (an existing campaign permission) | Roles that hold it |
+| | Permission | Who holds it |
 |---|---|---|
-| See the pages | `cam.campaigns.view` | Campaign Executive, Campaign Manager, Organisation Admin |
-| Upload, send, retry, stop | `cam.campaigns.create` | Campaign Executive, Organisation Admin |
+| See the pages, review a send, export | `cam.whatsapp.view` | Organisation Admin; any other role the administrator grants it to |
+| Upload, send, retry, stop, manage groups | `cam.whatsapp.operate` | Organisation Admin; any other role the administrator grants it to |
 
-No change was made to IAM. Every answer is limited to the caller's own organisation.
+The two codes are in IAM's permission catalogue and are kept for the Organisation Admin by default
+(`RoleAccessProfiles.AdministratorOnlyCodes`); the menu entries ask for `cam.whatsapp.view`.
+
+**Audit.** CAM writes its audit trail for every group change, every send request, every retry and
+every export (`WHATSAPP_SEND_LOG_EXPORTED`, with the number of rows and the export's reference,
+which the CSV also carries in `X-Export-Reference`). The worker's journal records what it did with each request.
 
 ### 13.3 The campaign's Recent Activity
 
@@ -739,12 +904,15 @@ When an upload or a broadcast names a campaign, the campaign's page shows it:
 
 | Area | Files |
 |---|---|
-| Campaign API | `Services/CAM/YDots.CAM.API/Controllers/WhatsAppController.cs`, `YDots.CAM.Application/Features/WhatsApp/`, `YDots.CAM.Infrastructure/Integration/WhatsApp/`, plus small edits to `PermissionCodes.cs`, both `DependencyInjection.cs`, `CampaignReadService.cs`, `appsettings.json`, `Dockerfile` |
+| Campaign API | `Services/CAM/YDots.CAM.API/Controllers/WhatsAppController.cs`, `YDots.CAM.Application/Features/WhatsApp/` (DTOs incl. `WhatsAppSelectionDtos.cs`, `WhatsAppSendRules.cs`, the group and send commands, queries and validators), `YDots.CAM.Infrastructure/Integration/WhatsApp/` (`WhatsAppIntegrationStore*.cs` incl. `.Selection.cs` and `.Sends.cs`, `WhatsAppRecipientGroupStore.cs`), plus small edits to `PermissionCodes.cs`, both `DependencyInjection.cs`, `CampaignReadService.cs`, `appsettings.json`, `Dockerfile` |
+| Recipient groups (CAM-owned) | `YDots.CAM.Domain/Entities/WhatsAppRecipientGroup.cs`, `WhatsAppRecipientGroupMember.cs`, `Persistence/Configurations/WhatsAppConfigurations.cs`, migration `20261015012949_AddWhatsAppRecipientGroups` |
+| Demo data | `Persistence/Seed/DemoWhatsAppSeeder.cs` writes `source_job_*` and `requested_count` when the worker's schema has them |
 | Deployment | `docker-compose.yml` (the shared volume and two settings for `ydot-cam`), `UI/YDots.UI/nginx.conf` (12 MB allowed on the upload route) |
-| Pages | `UI/YDots.UI/src/app/Service/whatsapp-api.service.ts` (new), and in `Features/YDot/WhatsApp/`: `whatsapp-store.service.ts`, `whatsapp.models.ts`, `wa-format.ts`, `check-number/`, `wati/`; `app.routes.ts` and `Shared/sidebar/sidebar.ts` (permission checks) |
+| Pages | `UI/YDots.UI/src/app/Service/whatsapp-api.service.ts`, and in `Features/YDot/WhatsApp/`: `whatsapp-store.service.ts`, `whatsapp.models.ts`, `wa-format.ts`, `check-number/`, `wati/`, `wati-head/`, `wati-groups/`, `wati-log/`; `app.routes.ts` (the Groups and Send log routes) and `Shared/sidebar/sidebar.ts` (permission checks) |
+| Shared | `Shared/services/popup-guard.service.ts`: a pop-up footer hidden because it held only close buttons is shown again once the screen adds its main action (Save group, Add to group, the send drawer's Retry and Export) |
 
-The page layout and styling were not changed. One control was added: a campaign picker on the
-upload review, using the existing drop-down component.
+The new tabs use the WhatsApp pages' existing components and styles (the same tables, filters,
+pop-ups and drawers); nothing in the application's theme was changed.
 
 ---
 
@@ -789,10 +957,19 @@ cannot message a stranger.
 | 10 | Kill the worker while a task is being polled | On restart it polls the same task id; `int_checknumber_tasks` still has one row |
 | 11 | Start with `CheckNumber__BaseUrl=https://127.0.0.1:9/` | Retries at 2, 4, 8 s in the log; the job fails with `CHECKNUMBER_UNAVAILABLE` and can be retried |
 | 12 | Press Stop on a running job | `Cancelled`, `CANCELLED_BY_USER`; answers already received are kept |
-| 13 | Send a broadcast to a number outside the allow-list | Skipped, `NOT_IN_ALLOWLIST` |
-| 14 | Send the same template to the same number twice | Second time skipped, `ALREADY_SENT` |
-| 15 | Sign in as another organisation | None of the first organisation's jobs, numbers or messages |
-| 16 | Sign in as a Campaign Manager | Can see everything; upload and send are refused (403) |
+| 13 | Let a check of 500+ numbers finish | "ready to select on WhatsApp Messages - nothing was messaged"; event `NUMBERS_READY_FOR_SELECTION`; **no new `int_wati_jobs` row** |
+| 14 | Upload a list of 20 numbers | The review says CheckNumber.ai bills it as 500 numbers; it can still be started (unless `MinimumNumbersPerTask` is raised) |
+| 15 | On Send message, search a name, filter by the check, select 10 rows | "10 of at most 50 selected"; names shown beside the numbers |
+| 16 | "Select the first 50 of N", then try to add one more | 50 selected; unselected rows lose their tick box and the header says "at most 50 per send". Selecting a page that does not fit adds what fits and says how many did not |
+| 17 | Save the selection as a group with tags; open Groups; "Use for a send" | The group lists its members with "still on WhatsApp"; using it selects them and carries its campaign and tags; "Clear selection" takes them back out |
+| 18 | Template with `{{name}}` from "Name from the file", fallback "Friend" | The preview changes with "Preview as"; the review shows each person's own message; a number without a name reads "Dear Friend" |
+| 19 | Review a selection holding a number already sent this template for this campaign, and (with the allow-list on) a number outside it | `ALREADY_SENT` and `NOT_IN_ALLOWLIST` under Skipped; the allow-list note is shown |
+| 20 | Send | Only the "Will be sent" numbers reach WATI; the send log opens on the send, live until it finishes; every selected number is listed with its check, CheckNumber.ai task and outcome |
+| 21 | Make WATI fail (stop the network or use a wrong token), send, then put it right and press "Retry N failed" | The send fails with `WATI_UNAVAILABLE` / `WATI_UNAUTHORIZED` / `WATI_DELIVERY_UNCERTAIN`; the retry messages only those numbers, once; Retry disappears |
+| 22 | Export the send log and one send | One CSV row per selected number; a `WHATSAPP_SEND_LOG_EXPORTED` audit row |
+| 23 | Open the check's job page | "Sent from this check" lists every send that used its numbers |
+| 24 | Sign in as another organisation | None of the first organisation's jobs, numbers, groups or sends |
+| 25 | Sign in as a role without `cam.whatsapp.*` | No Communications entries; the API answers 403 |
 
 Sample file: `D:\Permaspace\Phase3\samples\WAChecker2.txt` (550 numbers).
 
@@ -800,10 +977,36 @@ Sample file: `D:\Permaspace\Phase3\samples\WAChecker2.txt` (550 numbers).
 
 ## 16. What was verified, and what was not
 
-Run on 10 October 2026 against the live CheckNumber.ai and WATI services and the YDot Docker
-database, for the organisation Smile Foundation.
+### 15 October 2026: sends only to selected numbers
 
-### Verified
+Run against **local stand-ins** for CheckNumber.ai and WATI (https on localhost), a copy of the
+YDot database, the worker and the Campaign API built from source, and the web pages served from
+source. No call reached the real services: nothing was charged and nobody was messaged.
+
+| Test | Result |
+|---|---|
+| A check of 520 numbers, with names, `Pipeline:AutoSendWati=true` left set on purpose | Completed: 416 on WhatsApp, 104 not. The worker logged that the setting is retired, sent **nothing**, and recorded `NUMBERS_READY_FOR_SELECTION`. 510 names were read from the file. |
+| The pool | 534 numbers (the check plus demo data); search by name, filters by check / country / history with server-side counts; "Select the first 50 of 534" stopped at 50 |
+| Review of 15 selected numbers (one invalid, one twice, one never checked) | 12 will be sent, 3 left out (`INVALID_NUMBER`, `DUPLICATE_IN_JOB`, `NOT_IN_POOL`), each with its sentence; every message shown as that person reads it ("Dear Test Donor 001, ...") |
+| A send of 51 numbers | Refused: "One send may message at most 50 numbers; 51 are selected..." |
+| The send of the 15 | Exactly **12** receivers in the request to WATI, each with its own `name` and the `image_url`; every message traced to `INT-20261015-000001` and its task |
+| The same send again | `ALREADY_SENT` for each |
+| WATI answering 503 | The send failed (`WATI_DELIVERY_UNCERTAIN` after the lookups); "Retry 5 failed" was offered; after WATI recovered the retry sent those 5 once and the send completed; a second retry was refused |
+| Groups | Names unique per organisation, tags tidied, a stale edit refused (409), members removed, a deleted group's name kept on its sends |
+| Send log and exports | Status counts and filters; CSV with one row per selected number, an audit row and `X-Export-Reference` |
+| The pages in a headless browser, desktop and phone width | The three steps (filters, selection, group, template, per-person preview, review, confirm), a 25-number send completing live in the send log, Groups, a failed send and its retry, both exports, Delivered & read, Number Verification (500-number note, "Sent from this check") |
+| Defects the browser walk found, now fixed | Pop-ups whose main button appears later (Save group, Add to group, the drawers' Retry / Export) showed no buttons at all (shared pop-up guard); a group's tags stayed on a later hand-picked send; cramped drawer tables; at phone width the lists could not be scrolled to their end; the worker logged a concurrency error at the end of every send and finished it a round late (the lease renewal changed the job row's `xmin`) |
+| Demo data | Re-seeded: every seeded send now names its checks and tasks |
+
+**Not verified:** a real WATI send under the new flow. The worker's `.env` still holds the
+three-number allow-list and `Wati__MaxRecipientsPerJob=5`, on purpose; see [12.5](#125-before-going-live).
+
+### 10 October 2026: the first version, against the live services
+
+Run against the live CheckNumber.ai and WATI services and the YDot Docker database, for the
+organisation Smile Foundation. (At that time a check sent its messages automatically.)
+
+#### Verified
 
 | Test | Result |
 |---|---|
@@ -825,7 +1028,7 @@ database, for the organisation Smile Foundation.
 
 **Spend for all of this:** CheckNumber.ai, four tasks, about 0.19 USD. WATI, five template messages.
 
-### Not verified
+#### Not verified
 
 | | Why | What to do |
 |---|---|---|
@@ -855,6 +1058,11 @@ charged then.
 | The worker stops at start with `OptionsValidationException` | A setting is wrong | The message names it |
 | `relation "int_..." does not exist` in the web application | The worker has never run against that database | Start it once |
 | Uploads refused: "DataRoot is not configured" | The Campaign API does not know the data folder | Set `WhatsAppIntegration__DataRoot` (the compose file does) |
+| `Pipeline:AutoSendWati is set to true, but it is retired and ignored` at start | An old `.env` or compose setting | Remove it. Nothing is sent automatically either way |
+| "One send may message at most 50 numbers; 51 are selected" | The selection is larger than the cap | Send in parts, or raise `Wati__MaxRecipientsPerJob` on purpose (CAM's `WhatsAppIntegration__MaxRecipientsPerSend` is the upper bound) |
+| Send message shows "No validated numbers yet" | No check of this organisation has finished with numbers on WhatsApp | Run a check on Number Verification |
+| "None of the failed messages of WAT-... can be retried" | WATI refused those numbers, or WhatsApp failed them after delivery | Retrying cannot help; select the numbers again only if a new send makes sense |
+| A selected number appears under "Left out: NOT_IN_POOL" | It was typed or kept in a group, but no check of this organisation has answered it | Check it first |
 
 ---
 
@@ -869,7 +1077,10 @@ charged then.
 | **Costs are in USD**, as CheckNumber.ai bills them. | Add a conversion rate if the pages should show rupees. |
 | **CheckNumber.ai answers a file at once**, so the page cannot show answers arriving one by one. | Nothing to do; the page shows the provider's own progress counter. |
 | **The inbox is a shared folder.** | For several servers, put it on shared storage, or replace it with object storage behind the same interface (`IInboxFileSystem`). |
-| **The WhatsApp pages have no IAM menu entry or permission of their own**; they use the campaign permissions. | Add them to IAM's catalogue and change two constants in `PermissionCodes.cs`. |
+| **A selection lives in the browser tab.** A reload or sign-out clears it. | Save it as a group first; a group is kept in the database. |
+| **Names come only from the uploaded file.** A number checked before 15 October 2026 has no name. | Link numbers to donor records (DON) by number, so a donor's own name fills `{{name}}`. |
+| **Older automatic sends stay in the send log** as history ("automatic (older)") and cannot be retried; the demo data includes some. | Nothing to do; they are records of what happened. |
+| **Exports stop at 100,000 rows** (`WhatsAppIntegration:MaxExportRows`). | Narrow the filters, or raise the setting. |
 
 ---
 
@@ -879,7 +1090,12 @@ charged then.
 |---|---|
 | **Job** | One file being processed. `INT-20261010-000001`. |
 | **Task** | CheckNumber.ai's unit of work: one upload of numbers, with a `task_id`. |
-| **WATI job / broadcast** | One sending of one template to a set of numbers. `WAT-20261010-000001`. |
+| **WATI job / broadcast / send** | One sending of one template to the numbers a person selected. `WAT-20261010-000001`. |
+| **Pool** | An organisation's numbers that a check found on WhatsApp - what a person picks from. |
+| **Selection** | The numbers picked for the next send, each with the check it was picked from (its **source check**). |
+| **Left out** | A selected number that never became a message: not a number, picked twice, or not in the pool (`excluded_json`). |
+| **Skipped** | A selected number the sending rules held back, stored as a message with the reason. |
+| **Recipient group** | A saved selection with a name, tags and an optional campaign (the Campaign service's own table). |
 | **Batch** | One request to WATI, holding up to `BatchSize` numbers. |
 | **Fresh** | A number with no saved answer; it will be checked and paid for. |
 | **Already checked / saved / reused** | A number with a saved Yes or No; not checked again. |

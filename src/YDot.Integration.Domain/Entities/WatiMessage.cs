@@ -38,6 +38,21 @@ public sealed class WatiMessage : Entity, ITenantScoped
     /// <summary>The CheckNumber.ai task_id, denormalised for support queries.</summary>
     public string? CheckNumberProviderTaskId { get; set; }
 
+    /// <summary>
+    /// THE CHECK THIS NUMBER WAS PICKED FROM (int_integration_jobs.id): the job whose verified
+    /// answer made it eligible. For a selection it is the job the person chose the number from (or
+    /// the newest check that verified it); for an older automatic send it equals
+    /// <see cref="IntegrationJobId"/>. Null only on messages recorded before 15 October 2026 by a
+    /// manual broadcast, which did not keep it.
+    /// </summary>
+    public Guid? SourceJobId { get; set; }
+
+    /// <summary>That job's number (INT-yyyyMMdd-NNNNNN), denormalised so exports need no join.</summary>
+    public string? SourceJobNumber { get; set; }
+
+    /// <summary>The name the source file gave for the number, as it was used for this message (e.g. for {{name}}).</summary>
+    public string? ContactName { get; set; }
+
     public Guid PhoneNumberId { get; set; }
 
     public PhoneNumber? PhoneNumber { get; set; }

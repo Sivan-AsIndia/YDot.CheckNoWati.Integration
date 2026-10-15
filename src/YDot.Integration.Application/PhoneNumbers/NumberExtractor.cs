@@ -3,13 +3,15 @@ using YDot.Integration.Application.Abstractions.Files;
 namespace YDot.Integration.Application.PhoneNumbers;
 
 /// <summary>One thing the file held: a valid number (first or repeated sighting) or an unusable line.</summary>
+/// <param name="ContactName">The person's name the row gave beside the number (see <see cref="ContactNameReader"/>).</param>
 public sealed record NumberOccurrence(
     string SheetName,
     int LineNumber,
     string RawValue,
     string? E164,
     bool IsDuplicate,
-    string? InvalidReason)
+    string? InvalidReason,
+    string? ContactName = null)
 {
     public bool IsInvalid => E164 is null;
 }
@@ -38,7 +40,8 @@ public sealed record ExtractionResult(
 ///
 ///   - a row with no text at all is skipped (it is not counted as a row);
 ///   - a number seen earlier in the file (any sheet) is a duplicate;
-///   - a first line with no digits at all is a column heading ("Name, Phone"), not a bad line.
+///   - a first line with no digits at all is a column heading ("Name, Phone"), not a bad line -
+///     and when it heads a name column, that column is where each number's contact name is read.
 /// </summary>
 public static class NumberExtractor
 {
@@ -53,6 +56,11 @@ public static class NumberExtractor
         {
             int rows = 0, found = 0, unique = 0, duplicates = 0, invalid = 0;
 
+            // The heading row - line 1 with no digits, the same test that keeps it out of the
+            // invalid lines below - says which column holds the person's name, if any.
+            var heading = sheet.Rows.FirstOrDefault(row => row.LineNumber == 1 && ContactNameReader.IsHeading(row.Cells));
+            var nameColumns = heading is null ? null : ContactNameReader.NameColumns(heading.Cells);
+
             foreach (var row in sheet.Rows)
             {
                 if (!row.Cells.Any(cell => !string.IsNullOrWhiteSpace(cell)))
@@ -62,6 +70,9 @@ public static class NumberExtractor
 
                 rows++;
                 var scan = RowScanner.Scan(row.Cells);
+                var contactName = scan.Numbers.Count > 0
+                    ? ContactNameReader.FromRow(row.Cells, nameColumns, sheetHasHeading: heading is not null)
+                    : null;
 
                 foreach (var hit in scan.Numbers)
                 {
@@ -76,7 +87,7 @@ public static class NumberExtractor
                         unique++;
                     }
 
-                    occurrences.Add(new NumberOccurrence(sheet.Name, row.LineNumber, hit.Raw, hit.E164, isDuplicate, null));
+                    occurrences.Add(new NumberOccurrence(sheet.Name, row.LineNumber, hit.Raw, hit.E164, isDuplicate, null, contactName));
                 }
 
                 var isHeading = row.LineNumber == 1 && scan.Rejected?.Reason == RowScanner.NoPhoneNumberReason;

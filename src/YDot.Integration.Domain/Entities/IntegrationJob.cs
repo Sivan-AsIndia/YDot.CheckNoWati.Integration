@@ -41,19 +41,22 @@ public sealed class IntegrationJob : Entity, ITenantScoped
     /// <summary>Send fresh numbers to CheckNumber.ai. When false, only saved answers are used.</summary>
     public bool RunCheckNumber { get; set; } = true;
 
-    /// <summary>Message the verified numbers through WATI when the check is done.</summary>
-    public bool RunWati { get; set; } = true;
+    /// <summary>
+    /// RETIRED 15 Oct 2026: a check never messages anybody, so this is false on every new job. True
+    /// only on older jobs whose check sent its own WATI message to every verified number.
+    /// </summary>
+    public bool RunWati { get; set; }
 
     /// <summary>Check every number again, ignoring saved answers ("check them again anyway").</summary>
     public bool ForceRecheck { get; set; }
 
-    /// <summary>Job-specific WATI template; null means Wati:DefaultTemplateName.</summary>
+    /// <summary>Older jobs only (see RunWati): the template their automatic send used. Null on new jobs.</summary>
     public string? WatiTemplateName { get; set; }
 
-    /// <summary>Job-specific WATI broadcast name; null means Wati:DefaultBroadcastName.</summary>
+    /// <summary>Older jobs only (see RunWati): the broadcast name of their automatic send. Null on new jobs.</summary>
     public string? WatiBroadcastName { get; set; }
 
-    /// <summary>Job-specific template parameters as a JSON array of {name, value}; null means Wati:DefaultParameters.</summary>
+    /// <summary>Older jobs only (see RunWati): the values of their automatic send, JSON array of {name, value}.</summary>
     public string? WatiParametersJson { get; set; }
 
     // ---- What the file held ---------------------------------------------------------------
@@ -94,14 +97,16 @@ public sealed class IntegrationJob : Entity, ITenantScoped
     /// <summary>Distinct numbers CheckNumber.ai could not verify.</summary>
     public int WhatsAppUnknown { get; set; }
 
-    /// <summary>Verified numbers that qualified for a WATI message.</summary>
+    /// <summary>Older jobs only: verified numbers that qualified for their automatic WATI message. Sends made from a check's numbers are counted on the send (int_wati_jobs), not here.</summary>
     public int WatiEligible { get; set; }
 
-    /// <summary>Messages WATI accepted.</summary>
+    /// <summary>Older jobs only: messages of the automatic send that WATI accepted.</summary>
     public int WatiSent { get; set; }
 
+    /// <summary>Older jobs only: messages of the automatic send that failed.</summary>
     public int WatiFailed { get; set; }
 
+    /// <summary>Older jobs only: numbers the automatic send skipped, each with a reason.</summary>
     public int WatiSkipped { get; set; }
 
     /// <summary>What CheckNumber.ai estimated when the task(s) were created.</summary>

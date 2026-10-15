@@ -20,6 +20,12 @@ internal sealed class WatiJobConfiguration : IEntityTypeConfiguration<WatiJob>
         builder.Property(x => x.BroadcastName).HasMaxLength(200).IsRequired();
         builder.Property(x => x.ParametersJson).AsJson().IsRequired();
         builder.Property(x => x.RenderedPreview).HasMaxLength(4000);
+        builder.Property(x => x.TemplateBody).HasMaxLength(4000);
+        builder.Property(x => x.TemplateHeaderJson).AsJson();
+        builder.Property(x => x.ParameterBindingsJson).AsJson();
+        builder.Property(x => x.ExcludedJson).AsJson();
+        builder.Property(x => x.RecipientGroupName).HasMaxLength(200);
+        builder.Property(x => x.TagsJson).AsJson();
         builder.Property(x => x.ChannelNumber).HasMaxLength(20);
         builder.Property(x => x.ErrorCode).HasMaxLength(60);
         builder.Property(x => x.ErrorMessage).HasMaxLength(2000);
@@ -33,6 +39,10 @@ internal sealed class WatiJobConfiguration : IEntityTypeConfiguration<WatiJob>
         builder.HasIndex(x => new { x.Status, x.NextAttemptAtUtc });
         builder.HasIndex(x => x.IntegrationJobId);
         builder.HasIndex(x => x.CampaignId);
+
+        // RecipientGroupId is a SOFT link to CAM's cam_whatsapp_recipient_groups: each service owns
+        // and migrates its own tables, so there is no foreign key across them.
+        builder.HasIndex(x => x.RecipientGroupId);
 
         builder.HasMany(x => x.Batches).WithOne().HasForeignKey(b => b.WatiJobId).OnDelete(DeleteBehavior.Cascade);
         builder.HasMany(x => x.Messages).WithOne(m => m.WatiJob).HasForeignKey(m => m.WatiJobId).OnDelete(DeleteBehavior.Cascade);
@@ -67,6 +77,8 @@ internal sealed class WatiMessageConfiguration : IEntityTypeConfiguration<WatiMe
 
         builder.Property(x => x.CheckNumberTaskId).HasColumnName("checknumber_task_id");
         builder.Property(x => x.CheckNumberProviderTaskId).HasMaxLength(64).HasColumnName("checknumber_provider_task_id");
+        builder.Property(x => x.SourceJobNumber).HasMaxLength(30);
+        builder.Property(x => x.ContactName).HasMaxLength(120);
         builder.Property(x => x.WhatsAppNumber).HasMaxLength(20).IsRequired().HasColumnName("whatsapp_number");
         builder.Property(x => x.WhatsAppCheck).AsText(10).HasColumnName("whatsapp_check");
         builder.Property(x => x.IsValidWhatsAppNumber).HasColumnName("is_valid_whatsapp_number");
@@ -96,6 +108,11 @@ internal sealed class WatiMessageConfiguration : IEntityTypeConfiguration<WatiMe
         builder.HasIndex(x => new { x.TenantId, x.PhoneNumberId, x.TemplateName });
         builder.HasIndex(x => x.IntegrationJobId);
         builder.HasIndex(x => x.CampaignId);
+
+        // SourceJobId is a deliberate SOFT link (no foreign key), like the result pointers on
+        // int_input_file_numbers: it is audit - "which check verified this number" - and must not
+        // stop a check job being removed (a test file, a seed reset) once it has been sent from.
+        builder.HasIndex(x => x.SourceJobId);
 
         builder.HasOne(x => x.WatiBatch).WithMany().HasForeignKey(x => x.WatiBatchId).OnDelete(DeleteBehavior.SetNull);
         builder.HasOne(x => x.PhoneNumber).WithMany().HasForeignKey(x => x.PhoneNumberId).OnDelete(DeleteBehavior.NoAction);

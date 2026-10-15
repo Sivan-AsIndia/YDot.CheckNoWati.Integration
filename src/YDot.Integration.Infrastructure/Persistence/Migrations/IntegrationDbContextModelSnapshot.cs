@@ -774,6 +774,11 @@ namespace YDot.Integration.Infrastructure.Persistence.Migrations
                         .HasColumnType("character varying(20)")
                         .HasColumnName("classification");
 
+                    b.Property<string>("ContactName")
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)")
+                        .HasColumnName("contact_name");
+
                     b.Property<string>("CountryCode")
                         .HasMaxLength(4)
                         .HasColumnType("character varying(4)")
@@ -889,6 +894,10 @@ namespace YDot.Integration.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("TenantId", "NormalizedNumber")
                         .HasDatabaseName("ix_int_input_file_numbers_tenant_id_normalized_number");
+
+                    b.HasIndex("TenantId", "PhoneNumberId", "CreatedAtUtc")
+                        .HasDatabaseName("ix_int_input_file_numbers_verified_pool")
+                        .HasFilter("final_whatsapp_status = 'Yes'");
 
                     b.ToTable("int_input_file_numbers", null, t =>
                         {
@@ -1567,6 +1576,10 @@ namespace YDot.Integration.Infrastructure.Persistence.Migrations
                         .HasColumnType("character varying(2000)")
                         .HasColumnName("error_message");
 
+                    b.Property<string>("ExcludedJson")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("excluded_json");
+
                     b.Property<int>("FailedCount")
                         .HasColumnType("integer")
                         .HasColumnName("failed_count");
@@ -1588,6 +1601,10 @@ namespace YDot.Integration.Infrastructure.Persistence.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("next_attempt_at_utc");
 
+                    b.Property<string>("ParameterBindingsJson")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("parameter_bindings_json");
+
                     b.Property<string>("ParametersJson")
                         .IsRequired()
                         .HasColumnType("jsonb")
@@ -1600,6 +1617,15 @@ namespace YDot.Integration.Infrastructure.Persistence.Migrations
                     b.Property<int>("QueuedCount")
                         .HasColumnType("integer")
                         .HasColumnName("queued_count");
+
+                    b.Property<Guid?>("RecipientGroupId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("recipient_group_id");
+
+                    b.Property<string>("RecipientGroupName")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("recipient_group_name");
 
                     b.Property<string>("Reference")
                         .IsRequired()
@@ -1620,6 +1646,10 @@ namespace YDot.Integration.Infrastructure.Persistence.Migrations
                     b.Property<Guid?>("RequestedByUserId")
                         .HasColumnType("uuid")
                         .HasColumnName("requested_by_user_id");
+
+                    b.Property<int>("RequestedCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("requested_count");
 
                     b.Property<uint>("RowVersion")
                         .IsConcurrencyToken()
@@ -1646,6 +1676,19 @@ namespace YDot.Integration.Infrastructure.Persistence.Migrations
                         .HasMaxLength(30)
                         .HasColumnType("character varying(30)")
                         .HasColumnName("status");
+
+                    b.Property<string>("TagsJson")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("tags_json");
+
+                    b.Property<string>("TemplateBody")
+                        .HasMaxLength(4000)
+                        .HasColumnType("character varying(4000)")
+                        .HasColumnName("template_body");
+
+                    b.Property<string>("TemplateHeaderJson")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("template_header_json");
 
                     b.Property<string>("TemplateLabel")
                         .HasMaxLength(200)
@@ -1678,6 +1721,9 @@ namespace YDot.Integration.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("IntegrationJobId")
                         .HasDatabaseName("ix_int_wati_jobs_integration_job_id");
+
+                    b.HasIndex("RecipientGroupId")
+                        .HasDatabaseName("ix_int_wati_jobs_recipient_group_id");
 
                     b.HasIndex("Reference")
                         .IsUnique()
@@ -1724,6 +1770,11 @@ namespace YDot.Integration.Infrastructure.Persistence.Migrations
                     b.Property<DateTimeOffset?>("CompletedAtUtc")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("completed_at_utc");
+
+                    b.Property<string>("ContactName")
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)")
+                        .HasColumnName("contact_name");
 
                     b.Property<string>("ConversationId")
                         .HasMaxLength(200)
@@ -1833,6 +1884,15 @@ namespace YDot.Integration.Infrastructure.Persistence.Migrations
                         .HasColumnType("character varying(40)")
                         .HasColumnName("skip_reason");
 
+                    b.Property<Guid?>("SourceJobId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("source_job_id");
+
+                    b.Property<string>("SourceJobNumber")
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasColumnName("source_job_number");
+
                     b.Property<DateTimeOffset?>("StartedAtUtc")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("started_at_utc");
@@ -1914,6 +1974,9 @@ namespace YDot.Integration.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("PhoneNumberId")
                         .HasDatabaseName("ix_int_wati_messages_phone_number_id");
+
+                    b.HasIndex("SourceJobId")
+                        .HasDatabaseName("ix_int_wati_messages_source_job_id");
 
                     b.HasIndex("WatiBatchId")
                         .HasDatabaseName("ix_int_wati_messages_wati_batch_id");

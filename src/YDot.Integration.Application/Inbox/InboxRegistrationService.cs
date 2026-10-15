@@ -218,11 +218,13 @@ public sealed class InboxRegistrationService(
             Status = IntegrationJobStatus.Queued,
             CurrentStep = StepCodes.RegisterFile,
             RunCheckNumber = pipeline.EnableCheckNumber && (options?.RunCheckNumber ?? true),
-            RunWati = pipeline.EnableWati && pipeline.AutoSendWati && (options?.RunWati ?? true),
+
+            // A CHECK ONLY VERIFIES (15 October 2026). Its numbers are messaged when a person picks
+            // them on the WhatsApp Messages page, never because a file arrived - so a job never asks
+            // for WATI, whatever an older manifest or Pipeline:AutoSendWati still says, and the
+            // manifest's per-upload template settings are not kept.
+            RunWati = false,
             ForceRecheck = options?.ForceRecheck ?? false,
-            WatiTemplateName = Text.Truncate(Blank(manifest?.Wati?.TemplateName), 200),
-            WatiBroadcastName = Text.Truncate(Blank(manifest?.Wati?.BroadcastName), 200),
-            WatiParametersJson = manifest?.Wati?.Parameters is { Count: > 0 } parameters ? TemplateParameter.ToJson(parameters) : null,
             CreatedByUserId = file.UploadedByUserId,
             CreatedByName = file.UploadedByName,
             CreatedAtUtc = file.RegisteredAtUtc.Value,
@@ -265,12 +267,12 @@ public sealed class InboxRegistrationService(
             InputFileId = file.Id,
             JobId = job.Id,
             StepCode = StepCodes.RegisterFile,
-            Data = new { file.UploadReference, file.ContentSha256, job.RunCheckNumber, job.RunWati, job.ForceRecheck },
+            Data = new { file.UploadReference, file.ContentSha256, job.RunCheckNumber, job.ForceRecheck },
         }, cancellationToken);
         await journal.EventAsync(new JournalEvent
         {
             EventCode = EventCodes.JobCreated,
-            Message = $"Job {job.JobNumber} queued (CheckNumber.ai {(job.RunCheckNumber ? "on" : "off")}, WATI {(job.RunWati ? "on" : "off")}).",
+            Message = $"Job {job.JobNumber} queued (CheckNumber.ai {(job.RunCheckNumber ? "on" : "off")}; validation only - nothing is messaged until numbers are picked on the WhatsApp Messages page).",
             TenantId = file.TenantId,
             InputFileId = file.Id,
             JobId = job.Id,

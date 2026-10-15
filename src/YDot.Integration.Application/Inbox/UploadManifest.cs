@@ -46,6 +46,7 @@ public sealed record UploadManifest
 
     public UploadOptions? Options { get; init; }
 
+    /// <summary>RETIRED (15 October 2026), read and ignored: an upload no longer messages anybody.</summary>
     public UploadWatiSettings? Wati { get; init; }
 }
 
@@ -58,14 +59,21 @@ public sealed record UploadOptions
     /// <summary>False = do not send fresh numbers to CheckNumber.ai for this upload.</summary>
     public bool? RunCheckNumber { get; init; }
 
-    /// <summary>False = do not message the verified numbers automatically for this upload.</summary>
+    /// <summary>
+    /// RETIRED (15 October 2026), read and ignored. It once switched off the automatic message to
+    /// every verified number; there is no automatic message any more - numbers are messaged only
+    /// when a person picks them on the WhatsApp Messages page.
+    /// </summary>
     public bool? RunWati { get; init; }
 
     /// <summary>Process the file even if the same content was already processed for the same campaign.</summary>
     public bool AllowDuplicateFile { get; init; }
 }
 
-/// <summary>Job-specific WATI settings; anything left empty falls back to the worker's defaults.</summary>
+/// <summary>
+/// RETIRED (15 October 2026): the template of the automatic message that followed a check. Kept so
+/// a manifest written by an older web application still reads; the values are ignored.
+/// </summary>
 public sealed record UploadWatiSettings
 {
     public string? TemplateName { get; init; }
